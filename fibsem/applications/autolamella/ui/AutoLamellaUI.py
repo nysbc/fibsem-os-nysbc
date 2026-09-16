@@ -828,7 +828,7 @@ class AutoLamellaUI(QMainWindow):
                 self.det_widget = FibsemEmbeddedDetectionWidget(parent=self)
                 self.tabWidget.addTab(self.det_widget, "Detection")
                 self.tabWidget.setTabVisible(
-                    self.tabWidget.indexOf(self.det_widget), False
+                    self.tabWidget.indexOf(self.det_widget), True
                 )
 
             # spot burn widget (optional)
