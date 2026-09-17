@@ -7,12 +7,12 @@ import numpy as np
 from PyQt5 import QtWidgets
 from PyQt5.QtCore import pyqtSignal
 from PyQt5.QtGui import QFont
-from PyQt5.QtWidgets import QGridLayout, QLabel, QSizePolicy, QSpacerItem
+from PyQt5.QtWidgets import QGridLayout, QLabel, QSizePolicy, QSpacerItem, QPushButton, QToolButton
 
 import fibsem
 from fibsem.detection import detection
 from fibsem.detection import utils as det_utils
-from fibsem.detection.detection import DetectedFeatures
+from fibsem.detection.detection import DetectedFeatures, take_image_and_detect_features
 from fibsem.segmentation.model import load_model
 from fibsem.structures import (
     BeamType,
@@ -33,12 +33,14 @@ class FibsemEmbeddedDetectionUI(QtWidgets.QWidget):
         self._setup_ui()
 
         self.parent = parent
+        self.det = None
         self.has_user_corrected: bool = False
 
         # quad-view: a "mask" MaskSpec + a modal "detection" PointsSpec on a beam
         # canvas, owned by the controller.
         self._host_beam = None         # BeamType the detection overlays are hosted on
         self._detection_wired = False  # subscribed to controller.overlay_edited
+        self._model = None
 
         self.setup_connections()
 
@@ -161,16 +163,30 @@ class FibsemEmbeddedDetectionUI(QtWidgets.QWidget):
         self.label_instructions.setWordWrap(True)
         self.gridLayout.addWidget(self.label_instructions, 3, 0, 1, 2)
 
+        ## button to retake image and detect features
+        self.retake_and_detect_button = QPushButton("Retake Image and Detect Features")
+        self.gridLayout.addWidget(self.retake_and_detect_button,4,0,1,1)
+
+        self.load_model_tooltip_button = QToolButton()
+        self.load_model_tooltip_button.setToolTip("Load Model")
+        self.load_model_tooltip_button.setText("...")
+        self.gridLayout.addWidget(self.load_model_tooltip_button,4,1,1,1)
+
+
         # vertical spacer
         self.gridLayout.addItem(
             QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding),
-            4, 0, 1, 2,
+            5, 0, 1, 2,
         )
+
 
     def setup_connections(self):
         self.label_instructions.setText(
             """Drag the detected feature positions to move them. Press Continue when finished."""
         )
+
+        self.retake_and_detect_button.clicked.connect(self._retake_image_and_detect_features)
+        # self.load_model_tooltip_button.clicked.connect
 
     def clear_layers(self):
         """Remove the detection overlays from the canvas."""
@@ -211,7 +227,7 @@ class FibsemEmbeddedDetectionUI(QtWidgets.QWidget):
         if len(self.det.features) > 2:
             self.label_info.setText("Info not available.")
             return
-        
+
         if len(self.det.features) == 1:
             self.label_info.setText(
             f"""{self.det.features[0].name}: {self.det.features[0].px}
@@ -220,9 +236,9 @@ class FibsemEmbeddedDetectionUI(QtWidgets.QWidget):
             return
         if len(self.det.features) == 2:
             self.label_info.setText(
-                f"""Moving 
+                f"""Moving
                 {self.det.features[0].name}: {self.det.features[0].px}
-                to 
+                to
                 {self.det.features[1].name}: {self.det.features[1].px}
                 dx={self.det.distance.x*1e6:.2f}um, dy={self.det.distance.y*1e6:.2f}um
                 User Corrected: {self.has_user_corrected}
@@ -243,12 +259,23 @@ class FibsemEmbeddedDetectionUI(QtWidgets.QWidget):
 
         return self.det
 
+    def _retake_image_and_detect_features(self):
+        print("taking image and returning detection")
+
+        print(f"det checkpoint: {self.det.checkpoint} microscope: {self.parent.microscope}")
+
+        new_det = take_image_and_detect_features(
+            microscope=self.parent.microscope,
+            image_settings=self.parent.im
+        )
+
+
 
 def main():
     # load model
     checkpoint = "autolamella-mega-20240107.pt"
     model = load_model(checkpoint=checkpoint)
-    
+
     # load image
     image = FibsemImage.load(os.path.join(os.path.dirname(detection.__file__), "test_image_2.tif"))
 

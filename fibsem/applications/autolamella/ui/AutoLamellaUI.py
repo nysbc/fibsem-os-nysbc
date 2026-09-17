@@ -2078,7 +2078,7 @@ class AutoLamellaUI(QMainWindow):
         )
         if self.det_widget is not None:
             idx = self.tabWidget.indexOf(self.det_widget)
-            self.tabWidget.setTabVisible(idx, False)  # hide detection tab for now
+            self.tabWidget.setTabVisible(idx, True)  # hide detection tab for now
 
         if is_experiment_loaded and self.experiment is not None:
             self.lamella_list.setEnabled(has_lamella)
