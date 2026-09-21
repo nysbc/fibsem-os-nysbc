@@ -40,6 +40,9 @@ __all__ = [
     # basic milling
     "BasicMillingTaskConfig",
     "BasicMillingTask",
+    # move needle
+    "MoveNeedleTaskConfig",
+    "MoveNeedleTask",
     # acquire fluorescence image
     "AcquireFluorescenceImageConfig",
     "AcquireFluorescenceImageTask",
@@ -67,6 +70,10 @@ from fibsem.applications.autolamella.workflows.tasks.basic_milling import (
 from fibsem.applications.autolamella.workflows.tasks.fiducial import (
     MillFiducialTask,
     MillFiducialTaskConfig,
+)
+from fibsem.applications.autolamella.workflows.tasks.move_needle import (
+    MoveNeedleTask,
+    MoveNeedleTaskConfig,
 )
 from fibsem.applications.autolamella.workflows.tasks.perforation import (
     MillPerforationTask,
