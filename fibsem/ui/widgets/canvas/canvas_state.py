@@ -12,6 +12,7 @@ so they stay trivially testable and thread-safe to construct.
 Each spec is keyed on a canvas by its ``id``, so re-setting a spec with the same id
 updates that overlay in place rather than stacking a second one.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -36,6 +37,12 @@ class MillingSpec(OverlaySpec):
 
     Carries no image: the reducer injects the canvas's current image when driving
     the overlay (``set_stages`` needs pixel-size + shape).
+
+    ``filled`` and ``crosshairs`` are what a *preview* turns off. One task's stages
+    read well as translucent blocks with a crosshair each; several tasks' stages at
+    once stack into something you read around rather than read, where outlines alone
+    stay legible over the image. Both default to the milling editor's look, which is
+    the one an operator edits against.
     """
 
     id: str = "milling"
@@ -43,6 +50,8 @@ class MillingSpec(OverlaySpec):
     background_stages: Sequence = ()
     selected_index: Optional[int] = None
     visible: bool = True
+    filled: bool = True
+    crosshairs: bool = True
 
 
 @dataclass
@@ -83,7 +92,9 @@ class PointsSpec(OverlaySpec):
     numbered: bool = False
     colors: Optional[Sequence] = None
     labels: Optional[Sequence] = None
-    selected: Optional[int] = None  # selected point index (table-driven), preserved across re-renders
+    selected: Optional[int] = (
+        None  # selected point index (table-driven), preserved across re-renders
+    )
 
 
 @dataclass
@@ -104,8 +115,8 @@ class CanvasState:
     overlays: Dict[str, OverlaySpec] = field(default_factory=dict)
     info: List[Tuple[str, str]] = field(default_factory=list)
     armed_overlay: Optional[str] = None  # id that owns edit input (None = view/move)
-    armed_label: str = ""                # toolbar-mode label for the armed overlay
-    armed_icon: str = ""                 # toolbar-mode icon for the armed overlay
+    armed_label: str = ""  # toolbar-mode label for the armed overlay
+    armed_icon: str = ""  # toolbar-mode icon for the armed overlay
 
 
 @dataclass

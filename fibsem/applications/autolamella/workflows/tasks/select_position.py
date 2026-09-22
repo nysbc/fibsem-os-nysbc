@@ -25,6 +25,20 @@ class SelectMillingPositionTaskConfig(AutoLamellaTaskConfig):
             unit=constants.DEGREE_SYMBOL,
         ),
     )
+    ml_alignment: bool = field(
+        default=False,
+        metadata=field_meta(
+            label="ML Assisted Alignment",
+            tooltip="Align Feature (Default: Lamella Centre) to the center of the image, "
+            "Useful when performing this step after undercut milling for Waffle method"
+        )
+    )
+
+    model_checkpoint: str = field(
+    default="autolamella-waffle-20240107.pt",
+    metadata={"parameter": True, "help": "ML model checkpoint"},
+    )
+
     auto_milling_alignment: bool = field(
         default=False,
         metadata=field_meta(
@@ -129,6 +143,14 @@ class SelectMillingPositionTask(AutoLamellaTask):
                 image_settings=self.image_settings,
                 filename=f"ref_{self.task_name}_post_tilt",
                 field_of_view=self.config.reference_imaging.field_of_view1,
+            )
+
+        if self.config.ml_alignment:
+            # align with ML to the centre of lamella or relevant feature
+            self.image_settings.beam_type = BeamType.ION
+            self._align_with_ml_locally(
+                image_settings=self.image_settings,
+                checkpoint=self.config.model_checkpoint,
             )
 
         # confirm with user to move to milling position
