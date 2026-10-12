@@ -51,6 +51,7 @@ _SKIP_REASON_LABELS = {
     "not_required": "Not in required list",
     "failure": "Marked as failure",
     "missing_prereqs": "Prerequisites not met",
+    "liftout_req_mismatch_block": "Non liftout task on liftout block marked lamella"
 }
 # Selection marks the row you are acting on; it drives nothing else, so it stays
 # quiet. Painted rather than set as a stylesheet: a stylesheet set on the row

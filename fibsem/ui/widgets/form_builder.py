@@ -23,7 +23,7 @@ from __future__ import annotations
 import inspect
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, is_dataclass
 from dataclasses import field as dataclass_field
 from enum import Enum
 from typing import (
@@ -98,6 +98,9 @@ class Control:
     signals: Tuple[Any, ...] = ()
     inputs: Tuple[QWidget, ...] = dataclass_field(default_factory=tuple)
     editable: bool = True
+    # A control that is a form in its own right -- a list of dataclasses -- is
+    # cramped into a value column; a form may give it the full width instead.
+    wide: bool = False
 
     def __post_init__(self) -> None:
         if not self.inputs:
@@ -340,6 +343,25 @@ def _scalar_list(value: Any, annotation: Any) -> Control:
     )
 
 
+def _dataclass_list(value: Any, item_cls: Any, defaults: FormDefaults) -> Control:
+    """A list of flat dataclasses, edited one item at a time.
+
+    Each item's fields are built by `build_control`, with the same `defaults`,
+    so an item field declares its form exactly as a top-level one does.
+    """
+    # Imported here: the editor builds its own fields with build_control.
+    from fibsem.ui.widgets.dataclass_list_editor import DataclassListEditor
+
+    editor = DataclassListEditor(value, item_cls, defaults=defaults)
+    return Control(
+        widget=editor,
+        read=editor.get_items,
+        write=editor.set_items,
+        signals=(editor.items_changed,),
+        wide=True,
+    )
+
+
 def build_control(
     metadata: dict,
     value: Any,
@@ -466,6 +488,8 @@ def build_control(
         item_types = get_args(annotation)
         if not item_types or item_types[0] in (bool, int, float, str):
             return _scalar_list(value, annotation)
+        if is_dataclass(item_types[0]):
+            return _dataclass_list(value, item_types[0], defaults)
 
     if annotation is None:
         # A milling form, which has no annotation to fall back on: nothing here

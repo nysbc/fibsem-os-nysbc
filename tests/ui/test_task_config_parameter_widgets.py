@@ -45,6 +45,7 @@ from fibsem.ui.widgets.custom_widgets import (  # noqa: E402
     ValueComboBox,
     ValueSpinBox,
 )
+from fibsem.ui.widgets.dataclass_list_editor import DataclassListEditor  # noqa: E402
 
 
 def _control(form, field_name):
@@ -115,6 +116,7 @@ def _build(form_cls, config):
         ("a_scalar_list", QLineEdit),
         ("an_optional_float", ValueSpinBox),
         ("with_items", ValueComboBox),
+        ("nested_list", DataclassListEditor),
     ],
 )
 def test_editable_field_types_keep_their_editors(
@@ -130,12 +132,14 @@ def test_editable_field_types_keep_their_editors(
 
 
 @pytest.mark.parametrize("form_cls", FORMS, ids=FORM_IDS)
-@pytest.mark.parametrize("field_name", ["nested", "nested_list"])
+@pytest.mark.parametrize("field_name", ["nested"])
 def test_a_field_the_form_cannot_edit_is_shown_read_only(qapp, form_cls, field_name):
-    """A dataclass field (or a list of them) is displayed, but not as an editor.
+    """A bare dataclass field is displayed, but not as an editor.
 
     Displayed rather than dropped: these are real settings an operator wants to
-    read off the form, even when they have to be changed elsewhere.
+    read off the form, even when they have to be changed elsewhere. A *list* of
+    dataclasses used to be here too; it now has an editor of its own -- see
+    test_a_list_of_dataclasses_edits_its_items_in_place.
     """
     form = _build(form_cls, SampleTaskConfig())
 
@@ -207,12 +211,30 @@ def test_the_write_back_refuses_an_uneditable_field(qapp, form_cls):
             signal.connect(lambda *args, name=signal_name: announced.append(name))
 
     form._on_parameter_changed("nested")
-    form._on_parameter_changed("nested_list")
 
     assert announced == []
     assert isinstance(config.nested, NestedSettings)
-    assert isinstance(config.nested_list, list)
-    assert all(isinstance(item, NestedSettings) for item in config.nested_list)
+
+
+@pytest.mark.parametrize("form_cls", FORMS, ids=FORM_IDS)
+def test_a_list_of_dataclasses_edits_its_items_in_place(qapp, form_cls):
+    """The list editor writes back the same item objects, edited -- never text.
+
+    The data-loss guard above, restated for the field type that gained an editor:
+    a list of dataclasses used to be read-only precisely because the only way the
+    form had to show it would have turned it into a string on write-back.
+    """
+    config = SampleTaskConfig()
+    original = config.nested_list[0]
+    form = _build(form_cls, config)
+    editor = _control(form, "nested_list").widget
+
+    editor._controls["depth"].write(4.0)
+    editor._on_field_changed("depth")
+
+    assert config.nested_list[0] is original
+    assert isinstance(config.nested_list[0], NestedSettings)
+    assert config.nested_list[0].depth == 4.0
 
 
 @pytest.mark.parametrize("form_cls", FORMS, ids=FORM_IDS)
@@ -277,7 +299,14 @@ def test_every_widget_type_the_form_builds_is_connectable(qapp, form_cls):
     reaches the config. Cheaper to assert here than to notice in the app.
     """
     form = _build(form_cls, SampleTaskConfig())
-    known = (QCheckBox, QSpinBox, QDoubleSpinBox, QLineEdit, QComboBox)
+    known = (
+        QCheckBox,
+        QSpinBox,
+        QDoubleSpinBox,
+        QLineEdit,
+        QComboBox,
+        DataclassListEditor,
+    )
 
     unconnectable = [
         name

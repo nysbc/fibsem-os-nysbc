@@ -611,6 +611,31 @@ class TaskManager(BaseTaskManager):
         wanted — including items the user added mid-run, which are not in the
         original selection and were previously skipped as "not_required".
         """
+        # liftout task gate
+        # A lamella has a _is_liftout_block field
+        # A task may have for_liftout bool flag (not all tasks have this flag)
+        # Only if they match then they should run
+        # otherwise skip
+
+        # first check if a task has this flag and if so, what the flag is
+        task_runs_on = self.experiment.task_protocol.workflow_config.get_runs_on(
+            task_name=task_name
+        )
+
+        if (not lamella.is_liftout_block) and task_runs_on == "liftout":
+            logging.info(
+                f"Skipping lamella {lamella.name} for task {task_name},"
+                + f"lamella {lamella.name} is not marked for liftout and task {task_name} is marked for liftout"
+            )
+            return "liftout_req_mismatch_block"
+
+        if lamella.is_liftout_block and (not task_runs_on == "liftout"):
+            logging.info(
+                f"Skipping lamella {lamella.name} for task {task_name},"
+                + f"lamella {lamella.name} is marked for liftout and task {task_name} is not marked for liftout"
+            )
+            return "liftout_req_mismatch_task"
+
         if lamella.is_failure:
             logging.info(
                 f"Skipping lamella {lamella.name} for task {task_name}. Marked as failure or has defect."

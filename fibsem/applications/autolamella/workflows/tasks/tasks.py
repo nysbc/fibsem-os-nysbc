@@ -43,6 +43,9 @@ __all__ = [
     # move needle
     "MoveNeedleTaskConfig",
     "MoveNeedleTask",
+    # needle liftout
+    "NeedleLiftoutTaskConfig",
+    "NeedleLiftoutTask",
     # acquire fluorescence image
     "AcquireFluorescenceImageConfig",
     "AcquireFluorescenceImageTask",
@@ -74,6 +77,10 @@ from fibsem.applications.autolamella.workflows.tasks.fiducial import (
 from fibsem.applications.autolamella.workflows.tasks.move_needle import (
     MoveNeedleTask,
     MoveNeedleTaskConfig,
+)
+from fibsem.applications.autolamella.workflows.tasks.needle_liftout import (
+    NeedleLiftoutTask,
+    NeedleLiftoutTaskConfig,
 )
 from fibsem.applications.autolamella.workflows.tasks.perforation import (
     MillPerforationTask,

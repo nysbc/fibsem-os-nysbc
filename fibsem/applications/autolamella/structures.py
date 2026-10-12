@@ -284,6 +284,7 @@ class AutoLamellaTaskDescription:
     name: str  # unique_name
     supervise: bool
     required: bool
+    runs_on: str = "lamella"
     requires: List[str] = field(default_factory=list)
     scheduled_at: Optional[datetime] = None
     # Who a supervised task's questions are addressed to: "human" (the
@@ -406,6 +407,13 @@ class AutoLamellaWorkflowConfig:
                 return task.scheduled_at
         return None
 
+    def get_runs_on(self, task_name: str) -> str:
+        """Get the lamella process (e.g. lamella or liftout)"""
+        for task in self.tasks:
+            if task.name == task_name:
+                return task.runs_on
+        return "lamella"
+
     def add_task(self, task: AutoLamellaTaskConfig) -> None:
         """Add a task to the workflow configuration."""
         self.tasks.append(
@@ -413,6 +421,8 @@ class AutoLamellaWorkflowConfig:
                 name=task.task_name, supervise=True, required=True, requires=[]
             )
         )
+
+
 
     @property
     def is_valid(self) -> bool:

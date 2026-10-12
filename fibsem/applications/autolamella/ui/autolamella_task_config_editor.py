@@ -30,6 +30,7 @@ from fibsem.applications.autolamella.ui.autolamella_global_task_editor_dialog im
 )
 from fibsem.applications.autolamella.ui.autolamella_task_config_widget import (
     AutoLamellaTaskParametersConfigWidget,
+    MillingKeySelector,
 )
 from fibsem.applications.autolamella.ui.grid_protocol_widget import (
     GridProtocolWidget,
@@ -402,6 +403,8 @@ class AutoLamellaProtocolTaskConfigEditor(QWidget):
             milling_enabled=False,
             parent=self,
         )
+        # which milling entry it edits, for a task with more than one
+        self.milling_key_selector = MillingKeySelector(parent=self)
 
         self.fluorescence_acquisition_task_config_widget = (
             AutoLamellaFluorescenceAcquisitionTaskConfigWidget(
@@ -509,10 +512,15 @@ class AutoLamellaProtocolTaskConfigEditor(QWidget):
         col2_scroll.setWidget(col2_content)
 
         # --- Column 3: Milling parameters (config panels, no napari canvas) ---
+        col3_content = QWidget()
+        col3_layout = QVBoxLayout(col3_content)
+        col3_layout.setContentsMargins(0, 0, 0, 0)
+        col3_layout.addWidget(self.milling_key_selector)
+        col3_layout.addWidget(self.milling_task_editor)
         col3_scroll = QScrollArea()
         col3_scroll.setWidgetResizable(True)
         col3_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)  # type: ignore
-        col3_scroll.setWidget(self.milling_task_editor)
+        col3_scroll.setWidget(col3_content)
 
         # --- 3-column splitter ---
         splitter = QSplitter(Qt.Horizontal)  # type: ignore
@@ -574,6 +582,7 @@ class AutoLamellaProtocolTaskConfigEditor(QWidget):
         self.milling_task_editor.settings_changed.connect(
             self._on_milling_settings_changed
         )
+        self.milling_key_selector.key_selected.connect(self._on_milling_key_selected)
         self.task_parameters_config_widget.parameter_changed.connect(
             self._on_task_parameters_config_changed
         )
@@ -637,9 +646,7 @@ class AutoLamellaProtocolTaskConfigEditor(QWidget):
             # columns wait for a task rather than the editor failing to open.
             self.task_parameters_config_widget.setVisible(False)
             self.ref_image_params_widget.setVisible(False)
-            self._current_milling_key = None
-            self.milling_task_editor.clear()
-            self.milling_task_editor.setVisible(False)
+            self._show_milling(None)
             self.fluorescence_acquisition_task_config_widget.setVisible(False)
             return
         self.task_parameters_config_widget.setVisible(True)
@@ -648,16 +655,7 @@ class AutoLamellaProtocolTaskConfigEditor(QWidget):
         self.ref_image_params_widget.update_from_settings(task_config.reference_imaging)
 
         # set milling task config
-        if task_config.milling:
-            self._current_milling_key = next(iter(task_config.milling))
-            self.milling_task_editor.set_config(
-                task_config.milling[self._current_milling_key]
-            )
-            self.milling_task_editor.setVisible(True)
-        else:
-            self._current_milling_key = None
-            self.milling_task_editor.clear()
-            self.milling_task_editor.setVisible(False)
+        self._show_milling(task_config)
 
         # special handling for fluorescence acquisition task
         is_fluorescence_task = isinstance(task_config, AcquireFluorescenceImageConfig)
@@ -678,6 +676,35 @@ class AutoLamellaProtocolTaskConfigEditor(QWidget):
         self.pushButton_edit_spot_burn.setVisible(
             isinstance(task_config, SpotBurnFiducialTaskConfig)
         )
+
+    def _show_milling(self, task_config: Any, select: Optional[str] = None) -> None:
+        """Load one of the task's milling entries into the milling panel.
+
+        *select* names the entry to show; otherwise the first. The selector
+        appears only for a task with more than one entry.
+        """
+        keys = task_config.milling.keys() if task_config is not None else []
+        key = self.milling_key_selector.set_keys(keys, select)
+        self._current_milling_key = key
+        if key is None:
+            self.milling_task_editor.clear()
+            self.milling_task_editor.setVisible(False)
+            return
+        self.milling_task_editor.set_config(task_config.milling[key])
+        self.milling_task_editor.setVisible(True)
+
+    def _on_milling_key_selected(self, key: str) -> None:
+        """Switch the milling panel to another of the task's entries."""
+        task_config = self.experiment.task_protocol.task_config.get(
+            self.task_list_widget.selected_task
+        )
+        if task_config is None or key not in task_config.milling:
+            return
+        # Loading an entry is not an edit; keep whatever the dirty state was.
+        was_dirty = self._protocol_dirty
+        self._current_milling_key = key
+        self.milling_task_editor.set_config(task_config.milling[key])
+        self._set_protocol_dirty(was_dirty)
 
     def _on_milling_settings_changed(self, config: "FibsemMillingTaskConfig"):
         """Callback when the milling task config is changed."""
@@ -702,11 +729,16 @@ class AutoLamellaProtocolTaskConfigEditor(QWidget):
         )
 
         # update parameters in the task config
-        setattr(
-            self.experiment.task_protocol.task_config[selected_task_name],
-            field_name,
-            new_value,
-        )
+        task_config = self.experiment.task_protocol.task_config[selected_task_name]
+        setattr(task_config, field_name, new_value)
+
+        # A task whose steps carry milling (the needle liftout task) creates the
+        # entry when a step's milling is ticked; bring the new one up to edit.
+        sync = getattr(task_config, "sync_step_milling", None)
+        if callable(sync):
+            added = sync()
+            if added:
+                self._show_milling(task_config, select=added[-1])
 
         # save the experiment
         self._save_experiment()

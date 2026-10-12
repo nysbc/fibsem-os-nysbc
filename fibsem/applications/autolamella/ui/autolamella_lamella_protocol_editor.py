@@ -34,6 +34,7 @@ from fibsem.applications.autolamella.ui.autolamella_fluorescence_acquisition_tas
 )
 from fibsem.applications.autolamella.ui.autolamella_task_config_widget import (
     AutoLamellaTaskParametersConfigWidget,
+    MillingKeySelector,
 )
 from fibsem.applications.autolamella.workflows.tasks.tasks import (
     AcquireFluorescenceImageConfig,
@@ -310,6 +311,8 @@ class AutoLamellaProtocolEditorWidget(QWidget):
         # drive patterns/reposition on the FIB canvas (not napari)
         self.milling_task_editor.set_controller(self.view_controller)
         self.milling_task_editor.set_alignment_area_visible(False)
+        # which milling entry it edits, for a task with more than one
+        self.milling_key_selector = MillingKeySelector(parent=self)
 
         self.task_parameters_config_widget = AutoLamellaTaskParametersConfigWidget(
             parent=self
@@ -451,6 +454,7 @@ class AutoLamellaProtocolEditorWidget(QWidget):
         self.main_layout.addWidget(self.task_parameters_config_widget)
         self.main_layout.addWidget(self.spot_burn_coordinates_widget)
         self.main_layout.addWidget(self.ref_image_params_widget)  # type: ignore
+        self.main_layout.addWidget(self.milling_key_selector)
         self.main_layout.addWidget(self.milling_task_editor)  # type: ignore
         self.main_layout.addWidget(self.fluorescence_acquisition_task_config_widget)  # type: ignore
         self.main_layout.addStretch()
@@ -463,6 +467,7 @@ class AutoLamellaProtocolEditorWidget(QWidget):
         self.milling_task_editor.settings_changed.connect(
             self._on_milling_task_config_updated
         )
+        self.milling_key_selector.key_selected.connect(self._on_milling_key_selected)
         self.task_parameters_config_widget.parameter_changed.connect(
             self._on_task_parameters_config_changed
         )
@@ -811,12 +816,11 @@ class AutoLamellaProtocolEditorWidget(QWidget):
                         for mcfg in cfg.milling.values():
                             background_milling_stages.extend(mcfg.enabled_stages)
 
-        if milling_task_config:
-            self._current_milling_key = next(iter(milling_task_config))
+        key = self.milling_key_selector.set_keys(milling_task_config.keys())
+        if key is not None:
+            self._current_milling_key = key
             self.milling_task_editor.set_fib_image(self.image)
-            self.milling_task_editor.set_config(
-                milling_task_config[self._current_milling_key]
-            )
+            self.milling_task_editor.set_config(milling_task_config[key])
             self.milling_task_editor.set_background_milling_stages(
                 background_milling_stages
             )
@@ -870,7 +874,9 @@ class AutoLamellaProtocolEditorWidget(QWidget):
     def _on_milling_fov_changed(self, config: Dict[str, FibsemMillingTaskConfig]):
         """Display a warning if the milling FoV does not match the image FoV."""
         try:
-            key = next(iter(config))
+            # the entry on screen, which is not necessarily the first
+            current = getattr(self, "_current_milling_key", None)
+            key = current if current in config else next(iter(config))
             milling_fov = config[key].field_of_view
             image_hfw = self.image.metadata.image_settings.hfw  # type: ignore
             if not np.isclose(milling_fov, image_hfw):
@@ -923,9 +929,46 @@ class AutoLamellaProtocolEditorWidget(QWidget):
         # TODO: we should integrate both milling and parameter updates into a single config update method
 
         # update parameters in the task config
-        setattr(selected_lamella.task_config[selected_task_name], field_name, new_value)
+        task_config = selected_lamella.task_config[selected_task_name]
+        setattr(task_config, field_name, new_value)
+
+        # A task whose steps carry milling (the needle liftout task) creates the
+        # entry when a step's milling is ticked; bring the new one up to edit.
+        sync = getattr(task_config, "sync_step_milling", None)
+        if callable(sync):
+            added = sync()
+            if added:
+                self.milling_key_selector.set_keys(
+                    task_config.milling.keys(), added[-1]
+                )
+                self._show_milling_key(task_config, added[-1])
 
         self._save_experiment()
+
+    def _on_milling_key_selected(self, key: str) -> None:
+        """Switch the milling panel and canvas to another of the task's entries."""
+        selected_lamella = self._selected_lamella
+        selected_task_name = self.listWidget_selected_task.selected_task
+        if selected_lamella is None or not selected_task_name:
+            return
+        task_config = selected_lamella.task_config.get(selected_task_name)
+        if task_config is None or key not in task_config.milling:
+            return
+        self._show_milling_key(task_config, key)
+
+    def _show_milling_key(self, task_config: Any, key: str) -> None:
+        """Load one of the task's milling entries into the milling panel and canvas.
+
+        A copy, as on task selection: edits come back through settings_changed,
+        which writes them to the lamella under ``_current_milling_key``.
+        """
+        self._current_milling_key = key
+        self.milling_task_editor.set_fib_image(self.image)
+        self.milling_task_editor.set_config(copy.deepcopy(task_config.milling[key]))
+        self.milling_task_editor.setVisible(True)
+        self.milling_task_editor.setEnabled(True)
+        self._on_milling_fov_changed(task_config.milling)
+        self._apply_editing_lock(self._is_editing_locked())
 
     def _on_ref_image_settings_changed(self, settings: ReferenceImageParameters):
         """Callback when the image settings are changed."""

@@ -21,7 +21,9 @@ from typing import Any, Dict, List, Optional, get_type_hints
 
 from PyQt5.QtCore import pyqtSignal
 from PyQt5.QtWidgets import (
+    QComboBox,
     QGridLayout,
+    QHBoxLayout,
     QLabel,
     QVBoxLayout,
     QWidget,
@@ -83,6 +85,9 @@ def build_parameter_rows(
     type_hints = resolve_field_types(config)
     metadata = config.field_metadata
     rows: List[_Row] = []
+    # Counted rather than read off the grid: rowCount() never shrinks, so after
+    # the form is cleared and rebuilt it would start partway down.
+    grid_row = 0
 
     for name in config.parameters:
         m = metadata.get(name, {})
@@ -102,9 +107,16 @@ def build_parameter_rows(
         if m.get("tooltip"):
             label.setToolTip(m["tooltip"])
 
-        row_index = len(rows)
-        grid.addWidget(label, row_index, 0)
-        grid.addWidget(control.widget, row_index, 1)
+        # A wide control (a list of steps) gets the full width under its label:
+        # in the value column it is squeezed to a third of the form.
+        if control.wide:
+            grid.addWidget(label, grid_row, 0, 1, 2)
+            grid.addWidget(control.widget, grid_row + 1, 0, 1, 2)
+            grid_row += 2
+        else:
+            grid.addWidget(label, grid_row, 0)
+            grid.addWidget(control.widget, grid_row, 1)
+            grid_row += 1
         rows.append(
             _Row(
                 label=label,
@@ -115,6 +127,53 @@ def build_parameter_rows(
         )
 
     return rows
+
+
+class MillingKeySelector(QWidget):
+    """Which of a task's milling entries the milling panel is editing.
+
+    Most tasks have one entry, and the editors used to show only the first --
+    so a task with an entry per step (the needle liftout task) could not have
+    the others edited at all. Hidden while a task has one entry or none, so
+    every other task's panel looks as it always has.
+    """
+
+    key_selected = pyqtSignal(str)
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        label = QLabel("Milling")
+        label.setToolTip("This task has more than one milling entry; pick one to edit.")
+        self.combo = QComboBox()
+        layout.addWidget(label)
+        layout.addWidget(self.combo, 1)
+        self._loading = False
+        self.combo.currentIndexChanged.connect(self._on_index_changed)
+        self.setVisible(False)
+
+    def set_keys(self, keys: Any, select: Optional[str] = None) -> Optional[str]:
+        """Offer *keys*, selecting *select* if it is one, else the first.
+
+        Returns the selected key, or None for none. Does not emit: the caller
+        is already acting on the key it gets back.
+        """
+        keys = list(keys)
+        self._loading = True
+        self.combo.clear()
+        self.combo.addItems(keys)
+        chosen = select if select in keys else (keys[0] if keys else None)
+        if chosen is not None:
+            self.combo.setCurrentIndex(keys.index(chosen))
+        self._loading = False
+        self.setVisible(len(keys) > 1)
+        return chosen
+
+    def _on_index_changed(self, index: int) -> None:
+        if self._loading or index < 0:
+            return
+        self.key_selected.emit(self.combo.itemText(index))
 
 
 class AutoLamellaTaskParametersConfigWidget(QWidget):

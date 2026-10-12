@@ -53,6 +53,8 @@ from fibsem.applications.autolamella.workflows.tasks.tasks import (
     MillUndercutTaskConfig,
     MoveNeedleTask,
     MoveNeedleTaskConfig,
+    NeedleLiftoutTask,
+    NeedleLiftoutTaskConfig,
     SelectFluorescencePositionConfig,
     SelectFluorescencePositionTask,
     SelectMillingPositionTask,
@@ -90,6 +92,7 @@ BUILTIN_TASKS: Dict[str, Type[AutoLamellaTask]] = {
     SelectFluorescencePositionConfig.task_type: SelectFluorescencePositionTask,
     AcquireFluorescenceImageConfig.task_type: AcquireFluorescenceImageTask,
     MoveNeedleTaskConfig.task_type: MoveNeedleTask,
+    NeedleLiftoutTaskConfig.task_type: NeedleLiftoutTask,
 }
 
 # Runtime registered tasks
