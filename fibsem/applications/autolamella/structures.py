@@ -278,13 +278,67 @@ class AutoLamellaTaskConfig(ABC):
         self.reference_imaging.imaging = value
 
 
+# The roles a lamella can have in a workflow. Every lamella has one
+# (Lamella.role); every workflow step lists the roles it runs on
+# (AutoLamellaTaskDescription.runs_on); a lamella runs only the steps that list
+# its role -- TaskManager._should_skip applies it. A step lists only the default
+# role unless marked otherwise, so a lamella with any other role, a liftout block
+# say, runs only the steps marked for it.
+#
+# Add a role here to add a kind of workflow. The editors offer these as the
+# choices, and loading refuses anything that is not one.
+ROLE_LAMELLA = "lamella"
+ROLE_LIFTOUT = "liftout"
+LAMELLA_ROLES: Tuple[str, ...] = (ROLE_LAMELLA, ROLE_LIFTOUT)
+DEFAULT_ROLE = ROLE_LAMELLA
+
+# Roles at most one lamella in an experiment may hold: one liftout block per
+# experiment. Experiment.set_lamella_role moves such a role rather than sharing
+# it -- the lamella that had it goes back to the default.
+SINGLE_LAMELLA_ROLES: Tuple[str, ...] = (ROLE_LIFTOUT,)
+
+
+def _normalise_role(value: Any) -> str:
+    """A role as written by hand: case and surrounding space are forgiven."""
+    return str(value).strip().lower()
+
+
+def _read_runs_on(value: Any, step_name: str) -> List[str]:
+    """A step's ``runs_on`` as stored, checked against LAMELLA_ROLES.
+
+    Every way of being wrong fails toward running *less*. Something other than
+    a list is refused rather than converted, and the step runs on nothing --
+    converting a bare "liftout" to the default would run a liftout step on every
+    ordinary lamella. An unknown role is dropped, so its lamellae skip the step.
+    An empty result is flagged by AutoLamellaWorkflowConfig.validate().
+    """
+    if not isinstance(value, list):
+        logging.warning(
+            f"Workflow step '{step_name}' has runs_on {value!r}, which is not a "
+            f"list of roles; it will run on no lamella until it is set to some "
+            f"of {LAMELLA_ROLES}."
+        )
+        return []
+    roles = []
+    for raw in value:
+        role = _normalise_role(raw)
+        if role not in LAMELLA_ROLES:
+            logging.warning(
+                f"Workflow step '{step_name}' lists unknown role {raw!r}; "
+                f"ignoring it. Known roles: {LAMELLA_ROLES}."
+            )
+            continue
+        if role not in roles:
+            roles.append(role)
+    return roles
+
+
 @evented
 @dataclass
 class AutoLamellaTaskDescription:
     name: str  # unique_name
     supervise: bool
     required: bool
-    runs_on: str = "lamella"
     requires: List[str] = field(default_factory=list)
     scheduled_at: Optional[datetime] = None
     # Who a supervised task's questions are addressed to: "human" (the
@@ -292,6 +346,9 @@ class AutoLamellaTaskDescription:
     # agent answers; the operator can still answer first). Display-and-watchdog
     # semantics only — prompts are raised identically either way.
     supervisor: str = "human"
+    # The lamella roles this step runs on (see LAMELLA_ROLES). A lamella whose
+    # role is not listed skips it.
+    runs_on: List[str] = field(default_factory=lambda: [DEFAULT_ROLE])
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -310,6 +367,8 @@ class AutoLamellaTaskDescription:
         sa = data.get("scheduled_at")
         if isinstance(sa, str):
             data["scheduled_at"] = datetime.fromisoformat(sa)
+        if "runs_on" in data:
+            data["runs_on"] = _read_runs_on(data["runs_on"], data.get("name", ""))
         return cls(**data)
 
 
@@ -407,12 +466,16 @@ class AutoLamellaWorkflowConfig:
                 return task.scheduled_at
         return None
 
-    def get_runs_on(self, task_name: str) -> str:
-        """Get the lamella process (e.g. lamella or liftout)"""
+    def get_runs_on(self, task_name: str) -> List[str]:
+        """The lamella roles a step runs on (see LAMELLA_ROLES).
+
+        A step not in the workflow gets the default, the same as a step that
+        never had the setting. A copy: changing it does not change the step.
+        """
         for task in self.tasks:
             if task.name == task_name:
-                return task.runs_on
-        return "lamella"
+                return list(task.runs_on)
+        return [DEFAULT_ROLE]
 
     def add_task(self, task: AutoLamellaTaskConfig) -> None:
         """Add a task to the workflow configuration."""
@@ -421,8 +484,6 @@ class AutoLamellaWorkflowConfig:
                 name=task.task_name, supervise=True, required=True, requires=[]
             )
         )
-
-
 
     @property
     def is_valid(self) -> bool:
@@ -435,6 +496,17 @@ class AutoLamellaWorkflowConfig:
         issues = []
         task_names = [task.name for task in self.tasks]
         for i, task in enumerate(self.tasks):
+            if not task.runs_on:
+                issues.append(
+                    f"Task '{task.name}' runs on no lamella roles, so every lamella "
+                    "will skip it."
+                )
+            for role in task.runs_on:
+                if role not in LAMELLA_ROLES:
+                    issues.append(
+                        f"Task '{task.name}' runs on unknown role '{role}'. "
+                        f"Known roles: {', '.join(LAMELLA_ROLES)}."
+                    )
             for req in task.requires:
                 if req not in task_names:
                     issues.append(f"Task '{task.name}' requires unknown task '{req}'.")
@@ -965,7 +1037,10 @@ class Lamella:
     # does not track grids (every experiment before grid records existed). A
     # back-reference only; grid -> lamella is derived by filtering on it.
     grid_id: Optional[str] = None
-    is_liftout_block: bool = False  # whether this lamella is intended for liftout, used to determine which tasks to run in liftout protocols
+    # This lamella's role in the workflow (one of LAMELLA_ROLES): it runs only the
+    # workflow steps that list it. Distinct from lamella_type, which comes from
+    # the protocol and is the same for every lamella in an experiment.
+    role: str = DEFAULT_ROLE
     lamella_type: str = "On Grid"  # to know what type of lamella based on experiment
 
     def __post_init__(self):
@@ -1152,7 +1227,7 @@ class Lamella:
             "poi": self.poi.to_dict(),
             "description": self.description,
             "grid_id": self.grid_id,
-            "is_liftout_block": self.is_liftout_block,
+            "role": self.role,
             "lamella_type": self.lamella_type,
         }
 
@@ -1210,9 +1285,28 @@ class Lamella:
             poi=Point.from_dict(data.get("poi", {"x": 0, "y": 0})),
             description=data.get("description", ""),
             grid_id=data.get("grid_id"),
-            is_liftout_block=data.get("is_liftout_block", False),
+            role=cls._read_role(data.get("role", DEFAULT_ROLE), data["petname"]),
             lamella_type=data.get("lamella_type", "On Grid"),
         )
+
+    @staticmethod
+    def _read_role(value: Any, name: str) -> str:
+        """The lamella's role as stored. Case is forgiven; an unknown role is kept
+        rather than replaced, so the lamella matches no step and runs nothing --
+        defaulting it to an ordinary lamella would run ordinary steps on it."""
+        role = _normalise_role(value)
+        if role not in LAMELLA_ROLES:
+            logging.warning(
+                f"Lamella '{name}' has unknown role {value!r}; it will skip every "
+                f"step until set to one of {LAMELLA_ROLES}."
+            )
+        return role
+
+    @property
+    def is_liftout_block(self) -> bool:
+        """Whether this lamella's role is liftout. A convenience for tasks that
+        behave differently on one; which steps run is decided by role."""
+        return self.role == ROLE_LIFTOUT
 
     def load_reference_image(self, fname) -> FibsemImage:
         """Load a specific reference image for this lamella from disk
@@ -1548,6 +1642,30 @@ class Experiment:
     def get_lamella_by_name(self, name: str) -> Optional["Lamella"]:
         """Return the Lamella with the given name, or None if not found."""
         return next((p for p in self.positions if p.name == name), None)
+
+    def set_lamella_role(self, lamella: "Lamella", role: str) -> List["Lamella"]:
+        """Give *lamella* a role, keeping the experiment's role rules.
+
+        A role in SINGLE_LAMELLA_ROLES belongs to one lamella at a time, so giving
+        it to this one takes it from any other, which goes back to the default
+        role. Here rather than in the UI so every caller -- a script, the agent
+        server -- gets the same rule.
+
+        Returns the lamellae the role was taken from, so a caller can say so.
+        Does not save.
+        """
+        if role not in LAMELLA_ROLES:
+            raise ValueError(
+                f"Unknown lamella role {role!r}. Known roles: {LAMELLA_ROLES}."
+            )
+        displaced = []
+        if role in SINGLE_LAMELLA_ROLES:
+            for other in self.positions:
+                if other is not lamella and other.role == role:
+                    other.role = DEFAULT_ROLE
+                    displaced.append(other)
+        lamella.role = role
+        return displaced
 
     # -- grids ---------------------------------------------------------------
 
@@ -1973,7 +2091,11 @@ class Experiment:
 
         # create the lamella
         lamella = Lamella(
-            petname=name, path=path, number=number, task_config=deepcopy(task_config),lamella_type=self.task_protocol.lamella_type
+            petname=name,
+            path=path,
+            number=number,
+            task_config=deepcopy(task_config),
+            lamella_type=self.task_protocol.lamella_type,
         )
         if template.alignment_area is not None:
             lamella.alignment_area = deepcopy(template.alignment_area)

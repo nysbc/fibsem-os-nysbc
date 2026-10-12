@@ -19,6 +19,7 @@ from PyQt5.QtWidgets import (
 )
 
 from fibsem.applications.autolamella.structures import (
+    DEFAULT_ROLE,
     AutoLamellaTaskDescription,
     AutoLamellaWorkflowConfig,
 )
@@ -104,21 +105,33 @@ def _supervise_icon(task: AutoLamellaTaskDescription) -> tuple[str, str, str]:
     return "mdi:lightning-bolt-circle", stylesheets.AUTOMATED_COLOR, "Automated"
 
 
-def _requires_text(task: AutoLamellaTaskDescription, font: QFont) -> str:
-    """What the task waits for, sized to the column that holds it.
+def _runs_on_text(task: AutoLamellaTaskDescription) -> str:
+    """The roles a task runs on, when that is not just the default.
 
-    Empty where a task has no dependency: "No requirements" on every row was what
+    Empty for most rows, for the reason the requirements text is: a label on
+    every row is what would bury the few that differ.
+    """
+    runs_on = list(getattr(task, "runs_on", [DEFAULT_ROLE]))
+    if runs_on == [DEFAULT_ROLE]:
+        return ""
+    return "on " + (", ".join(runs_on) if runs_on else "nothing")
+
+
+def _detail_text(task: AutoLamellaTaskDescription, font: QFont) -> str:
+    """The detail column: the roles a task runs on, then what it waits for.
+
+    Empty where a task has neither: "No requirements" on every row was what
     buried the two or three that have one.
 
     Elided rather than left to run. A task waiting on four others produced a label
     wider than the row, and Qt cut it off mid-word; the row's tooltip carries the
     full list.
     """
-    if not task.requires:
-        return ""
-    return QFontMetrics(font).elidedText(
-        "after " + ", ".join(task.requires), Qt.ElideRight, REQUIRES_MAX_WIDTH
-    )
+    parts = [_runs_on_text(task)]
+    if task.requires:
+        parts.append("after " + ", ".join(task.requires))
+    text = " · ".join(part for part in parts if part)
+    return QFontMetrics(font).elidedText(text, Qt.ElideRight, REQUIRES_MAX_WIDTH)
 
 
 class WorkflowTaskRowWidget(QWidget):
@@ -246,12 +259,13 @@ class WorkflowTaskRowWidget(QWidget):
     def refresh(self) -> None:
         """Re-read all display fields from the stored task."""
         self.name_label.setText(self.task.name)
-        self.requires_label.setText(
-            _requires_text(self.task, self.requires_label.font())
-        )
-        self.setToolTip(
-            "Requires: " + ", ".join(self.task.requires) if self.task.requires else ""
-        )
+        self.requires_label.setText(_detail_text(self.task, self.requires_label.font()))
+        tooltip = []
+        if _runs_on_text(self.task):
+            tooltip.append("Runs on: " + (", ".join(self.task.runs_on) or "nothing"))
+        if self.task.requires:
+            tooltip.append("Requires: " + ", ".join(self.task.requires))
+        self.setToolTip("\n".join(tooltip))
         icon_name, icon_color, tooltip = _supervise_icon(self.task)
         self.btn_supervise.setIcon(fibsem_icon(icon_name, color=icon_color))
         self.btn_supervise.setToolTip(tooltip)

@@ -37,6 +37,7 @@ from PyQt5.QtWidgets import (
 from superqt import ensure_main_thread
 
 from fibsem.applications.autolamella.structures import (
+    DEFAULT_ROLE,
     AutoLamellaTaskStatus,
     DefectState,
     DefectType,
@@ -193,9 +194,13 @@ class _LamellaRow(QWidget):
         # signal, and it names the lamella that changed -- so it costs one
         # `refresh_lamella` rather than a subscription per row, and the row follows a
         # running workflow either way.
+        # `role` is the same kind of field -- set only from the GUI -- and it changes
+        # on lamellae nobody selected: giving one the liftout role takes it from
+        # another (Experiment.set_lamella_role), whose row has to follow.
         # type: ignore because @evented adds .events dynamically.
         self.lamella.events.description.connect(self.refresh)  # type: ignore[union-attr]
         self.lamella.events.defect.connect(self.refresh)  # type: ignore[union-attr]
+        self.lamella.events.role.connect(self.refresh)  # type: ignore[union-attr]
 
         self.refresh()
 
@@ -239,7 +244,13 @@ class _LamellaRow(QWidget):
 
     @ensure_main_thread
     def refresh(self) -> None:
-        self.name_label.setText(self.lamella.name)
+        # the role only when it is not the default: most rows say nothing
+        role = getattr(self.lamella, "role", DEFAULT_ROLE)
+        self.name_label.setText(
+            self.lamella.name
+            if role == DEFAULT_ROLE
+            else f"{self.lamella.name} ({role})"
+        )
         self.setToolTip(self.lamella.description or "")
         text, style = _lamella_status_text(self.lamella)
         self.status_label.setText(text)

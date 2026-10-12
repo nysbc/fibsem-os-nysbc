@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from PyQt5.QtCore import QDateTime, QSize, Qt, pyqtSignal
 from PyQt5.QtWidgets import (
@@ -17,7 +17,10 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from fibsem.applications.autolamella.structures import AutoLamellaTaskDescription
+from fibsem.applications.autolamella.structures import (
+    LAMELLA_ROLES,
+    AutoLamellaTaskDescription,
+)
 from fibsem.ui import stylesheets
 from fibsem.ui.icon import fibsem_icon
 from fibsem.ui.tokens import (
@@ -137,6 +140,35 @@ class WorkflowTaskEditorWidget(QWidget):
         self._optional_cb.setChecked(not task.required)
         pc.addWidget(self._optional_cb)
 
+        # Which lamella roles this task runs on. A box per role rather than a combo:
+        # a task may run on several, and a combo holds one.
+        runs_on_row = QHBoxLayout()
+        runs_on_row.setContentsMargins(0, 0, 0, 0)
+        runs_on_row.setSpacing(12)
+        runs_on_label = QLabel("Runs on")
+        runs_on_label.setStyleSheet("background: transparent;")
+        runs_on_label.setToolTip(
+            "Which lamellae this task runs on, by role. A lamella whose role is "
+            "not ticked skips this task."
+        )
+        runs_on_row.addWidget(runs_on_label)
+        self._role_cbs: Dict[str, QCheckBox] = {}
+        for role in LAMELLA_ROLES:
+            cb = QCheckBox(role.capitalize())
+            cb.setChecked(role in task.runs_on)
+            runs_on_row.addWidget(cb)
+            self._role_cbs[role] = cb
+        runs_on_row.addStretch(1)
+        pc.addLayout(runs_on_row)
+
+        self._runs_on_hint = QLabel(
+            "Tick at least one: a task that runs on no role is skipped for every "
+            "lamella."
+        )
+        self._runs_on_hint.setStyleSheet(_HINT_WARN_STYLE)
+        self._runs_on_hint.setWordWrap(True)
+        pc.addWidget(self._runs_on_hint)
+
         self._schedule_cb = QCheckBox("Schedule start time")
         self._schedule_cb.setChecked(task.scheduled_at is not None)
 
@@ -239,6 +271,11 @@ class WorkflowTaskEditorWidget(QWidget):
         self._apply_btn.clicked.connect(self._on_apply)
         self._cancel_btn.clicked.connect(self.cancel_clicked)
 
+        # after the Apply button exists, which the hint enables and disables
+        for cb in self._role_cbs.values():
+            cb.toggled.connect(self._refresh_runs_on_hint)
+        self._refresh_runs_on_hint()
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -308,6 +345,12 @@ class WorkflowTaskEditorWidget(QWidget):
         self._name_label.setText(task.name)
         self._optional_cb.setChecked(not task.required)
 
+        for role, cb in self._role_cbs.items():
+            cb.blockSignals(True)
+            cb.setChecked(role in task.runs_on)
+            cb.blockSignals(False)
+        self._refresh_runs_on_hint()
+
         self._schedule_cb.blockSignals(True)
         self._schedule_cb.setChecked(task.scheduled_at is not None)
         self._schedule_cb.blockSignals(False)
@@ -351,8 +394,18 @@ class WorkflowTaskEditorWidget(QWidget):
         visible = min(max(self._req_list.count(), 1), _MAX_VISIBLE_REQS)
         self._req_list.setFixedHeight(visible * _ROW_HEIGHT + 2 * self._req_list.frameWidth())
 
+    def _ticked_roles(self) -> List[str]:
+        return [role for role, cb in self._role_cbs.items() if cb.isChecked()]
+
+    def _refresh_runs_on_hint(self) -> None:
+        """Warn, and hold Apply, while no role is ticked."""
+        none_ticked = not self._ticked_roles()
+        self._runs_on_hint.setVisible(none_ticked)
+        self._apply_btn.setEnabled(not none_ticked)
+
     def _on_apply(self) -> None:
         self._task.required = not self._optional_cb.isChecked()
+        self._task.runs_on = self._ticked_roles()
         self._task.requires = [
             row.name_label.text()
             for row in self._req_rows

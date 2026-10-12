@@ -611,36 +611,25 @@ class TaskManager(BaseTaskManager):
         wanted — including items the user added mid-run, which are not in the
         original selection and were previously skipped as "not_required".
         """
-        # liftout task gate
-        # A lamella has a _is_liftout_block field
-        # A task may have for_liftout bool flag (not all tasks have this flag)
-        # Only if they match then they should run
-        # otherwise skip
-
-        # first check if a task has this flag and if so, what the flag is
-        task_runs_on = self.experiment.task_protocol.workflow_config.get_runs_on(
-            task_name=task_name
-        )
-
-        if (not lamella.is_liftout_block) and task_runs_on == "liftout":
-            logging.info(
-                f"Skipping lamella {lamella.name} for task {task_name},"
-                + f"lamella {lamella.name} is not marked for liftout and task {task_name} is marked for liftout"
-            )
-            return "liftout_req_mismatch_block"
-
-        if lamella.is_liftout_block and (not task_runs_on == "liftout"):
-            logging.info(
-                f"Skipping lamella {lamella.name} for task {task_name},"
-                + f"lamella {lamella.name} is marked for liftout and task {task_name} is not marked for liftout"
-            )
-            return "liftout_req_mismatch_task"
-
         if lamella.is_failure:
             logging.info(
                 f"Skipping lamella {lamella.name} for task {task_name}. Marked as failure or has defect."
             )
             return "failure"
+
+        # The role gate: a lamella runs only the steps that list its role (see
+        # structures.LAMELLA_ROLES). A step lists only the default role unless
+        # marked otherwise, so a liftout block runs only the steps marked for it.
+        # After failure, which says the more useful thing about a dead lamella;
+        # before prerequisites, so a step that never applies to this lamella says
+        # that rather than that something it needs has not run.
+        runs_on = self.experiment.task_protocol.workflow_config.get_runs_on(task_name)
+        if lamella.role not in runs_on:
+            logging.info(
+                f"Skipping lamella {lamella.name} for task {task_name}: the "
+                f"lamella's role is {lamella.role!r} and the task runs on {runs_on}."
+            )
+            return "not_for_this_role"
 
         task_requirements = self.experiment.task_protocol.workflow_config.requirements(
             task_name

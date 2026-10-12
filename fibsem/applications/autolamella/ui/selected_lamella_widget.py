@@ -12,7 +12,11 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from fibsem.applications.autolamella.structures import Lamella
+from fibsem.applications.autolamella.structures import (
+    DEFAULT_ROLE,
+    LAMELLA_ROLES,
+    Lamella,
+)
 from fibsem.applications.autolamella.ui.lamella_pose_list_widget import (
     LamellaPoseListWidget,
 )
@@ -23,6 +27,7 @@ from fibsem.ui.tokens import (
 from fibsem.ui.widgets.custom_widgets import (
     IconToolButton,
     TitledPanel,
+    ValueComboBox,
     ValueSpinBox,
 )
 
@@ -46,9 +51,16 @@ class SelectedLamellaWidget(QWidget):
     # on every set_lamella as well as on a tick, so a consumer that only follows this
     # signal never shows one lamella's patterns while another is selected.
     pattern_overlays_changed = pyqtSignal(list)  # task names
+    role_changed = pyqtSignal(str)  # the role picked for the selected lamella
 
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
+    def __init__(
+        self, parent: Optional[QWidget] = None, show_role: bool = False
+    ) -> None:
+        """``show_role``: offer the role combo. Off by default, because a host that
+        does not connect :attr:`role_changed` would show a control that does
+        nothing -- the coincidence viewer hosts this panel too."""
         super().__init__(parent)
+        self._show_role = show_role
 
         # --- description row (read-only mirror; edited in the Lamella editor) ---
         self._lamella: Optional[Lamella] = None
@@ -80,6 +92,22 @@ class SelectedLamellaWidget(QWidget):
         self._action_apply_obj_to_all = obj_menu.addAction("Apply to All Lamella")
         self.btn_objective_actions.setMenu(obj_menu)
 
+        # --- role row: which workflow steps this lamella runs ---
+        self.label_role = QLabel("Role")
+        self.combo_role = ValueComboBox(
+            list(LAMELLA_ROLES), DEFAULT_ROLE, format_fn=lambda role: role.capitalize()
+        )
+        role_tip = (
+            "Which workflow steps this lamella runs: only the steps whose "
+            "'Runs on' includes its role. Only one lamella in an experiment can "
+            "be the liftout block."
+        )
+        self.label_role.setToolTip(role_tip)
+        self.combo_role.setToolTip(role_tip)
+        # shown by set_lamella, and only for a host that asked for it
+        self.label_role.setVisible(False)
+        self.combo_role.setVisible(False)
+
         # --- pose list ---
         self.pose_list = LamellaPoseListWidget()
 
@@ -94,9 +122,11 @@ class SelectedLamellaWidget(QWidget):
         obj_row_layout.addWidget(self.spinbox_objective_position)
         obj_row_layout.addWidget(self.btn_objective_actions)
         content_layout.addWidget(self.description_label, 0, 0, 1, 2)
-        content_layout.addWidget(self.label_objective_position, 1, 0)
-        content_layout.addWidget(obj_row, 1, 1)
-        content_layout.addWidget(self.pose_list, 2, 0, 1, 2)
+        content_layout.addWidget(self.label_role, 1, 0)
+        content_layout.addWidget(self.combo_role, 1, 1)
+        content_layout.addWidget(self.label_objective_position, 2, 0)
+        content_layout.addWidget(obj_row, 2, 1)
+        content_layout.addWidget(self.pose_list, 3, 0, 1, 2)
 
         self._panel = TitledPanel(
             "Selected Lamella", content=content, collapsible=False
@@ -120,6 +150,9 @@ class SelectedLamellaWidget(QWidget):
         self.pose_list.update_requested.connect(self.pose_update_requested)
         self.pose_list.move_to_requested.connect(self.pose_move_to_requested)
         self.pose_list.pattern_overlays_changed.connect(self.pattern_overlays_changed)
+        self.combo_role.currentIndexChanged.connect(
+            lambda _: self.role_changed.emit(self.combo_role.value())
+        )
 
     # ------------------------------------------------------------------
     # Public API
@@ -138,6 +171,8 @@ class SelectedLamellaWidget(QWidget):
         if lamella is None:
             self._panel.set_title("Selected Lamella")
             self.description_label.setVisible(False)
+            self.label_role.setVisible(False)
+            self.combo_role.setVisible(False)
             self.label_objective_position.setVisible(False)
             self.spinbox_objective_position.setVisible(False)
             self.btn_objective_actions.setVisible(False)
@@ -147,6 +182,14 @@ class SelectedLamellaWidget(QWidget):
 
         # show which lamella is selected in the panel title
         self._panel.set_title(f"Selected Lamella — {lamella.name}")
+
+        # role: filled without emitting, or selecting a lamella would read as
+        # the operator changing its role
+        self.label_role.setVisible(self._show_role)
+        self.combo_role.setVisible(self._show_role)
+        self.combo_role.blockSignals(True)
+        self.combo_role.set_value(lamella.role)
+        self.combo_role.blockSignals(False)
 
         # read-only description mirror; live-updates when edited in the Lamella editor
         self.description_label.setVisible(True)

@@ -309,7 +309,7 @@ class AutoLamellaUI(QMainWindow):
         self.lamella_list.enable_update_action(True)
         self.lamella_list.enable_remove_button(True)
 
-        self.selected_lamella_widget = SelectedLamellaWidget()
+        self.selected_lamella_widget = SelectedLamellaWidget(show_role=True)
 
         self.grid_layout_experiment.addWidget(self.lamella_list, 0, 0, 1, 2)
         self.grid_layout_experiment.addWidget(self.selected_lamella_widget, 1, 0, 1, 2)
@@ -429,8 +429,28 @@ class AutoLamellaUI(QMainWindow):
         self.selected_lamella_widget.pattern_overlays_changed.connect(
             self._on_pattern_overlays_changed
         )
+        self.selected_lamella_widget.role_changed.connect(self._on_lamella_role_changed)
 
     ##########
+
+    def _on_lamella_role_changed(self, role: str) -> None:
+        """Give the selected lamella its new role and save.
+
+        The one-liftout-block rule lives in Experiment.set_lamella_role; this
+        only says so when it moved the role off another lamella, since that
+        lamella's list row changing on its own would otherwise go unexplained.
+        """
+        lamella = self.get_selected_lamella()
+        if lamella is None or self.experiment is None:
+            return
+        displaced = self.experiment.set_lamella_role(lamella, role)
+        self.experiment.save()
+        for other in displaced:
+            notification_service.show_toast(
+                f"Only one lamella can be {role}: moved from {other.name} to "
+                f"{lamella.name}.",
+                "info",
+            )
 
     def _on_pattern_overlays_changed(self, task_names: List[str]) -> None:
         """Draw the selected tasks' milling patterns over the FIB image.

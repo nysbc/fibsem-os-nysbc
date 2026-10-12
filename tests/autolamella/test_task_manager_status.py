@@ -294,6 +294,125 @@ def test_no_requirements_runs(manager):
     )
 
 
+# ── _should_skip: the role gate ───────────────────────────────────────────────
+
+
+def _trench(manager: TaskManager) -> AutoLamellaTaskDescription:
+    workflow = manager.experiment.task_protocol.workflow_config
+    return next(t for t in workflow.tasks if t.name == "Trench")
+
+
+@pytest.mark.parametrize(
+    "role,runs_on,expected",
+    [
+        ("lamella", ["lamella"], None),
+        ("liftout", ["lamella"], "not_for_this_role"),
+        ("lamella", ["liftout"], "not_for_this_role"),
+        ("liftout", ["liftout"], None),
+        ("lamella", ["lamella", "liftout"], None),
+        ("liftout", ["lamella", "liftout"], None),
+        ("lamella", [], "not_for_this_role"),
+    ],
+)
+def test_a_lamella_runs_only_the_steps_that_list_its_role(
+    manager, role, runs_on, expected
+):
+    _trench(manager).runs_on = runs_on
+    lamella = manager.experiment.get_lamella_by_name("L1")
+    lamella.role = role
+
+    assert manager._should_skip(lamella, "Trench") == expected
+
+
+def test_a_step_that_says_nothing_never_runs_on_a_liftout_block(manager):
+    """The default is the rule: a liftout block runs only steps marked for it."""
+    lamella = manager.experiment.get_lamella_by_name("L1")
+    lamella.role = "liftout"
+
+    assert manager._should_skip(lamella, "Trench") == "not_for_this_role"
+
+
+def test_a_failed_lamella_says_so_before_its_role(manager):
+    """Failure is the more useful thing to report about a dead lamella."""
+    lamella = manager.experiment.get_lamella_by_name("L1")
+    lamella.role = "liftout"
+    lamella.defect.state = DefectType.FAILURE
+
+    assert manager._should_skip(lamella, "Trench") == "failure"
+
+
+def test_a_step_that_never_applies_does_not_claim_missing_prerequisites(tmp_path):
+    """Its prerequisites are irrelevant: the step does not run on this role."""
+    experiment = make_experiment(
+        tmp_path, requirements={"Undercut": ["Trench"]}, lamella_names=["L1"]
+    )
+    m = TaskManager(
+        microscope=NoMicroscope(), experiment=experiment, parent_ui=RecordingUI()
+    )
+    workflow = experiment.task_protocol.workflow_config
+    next(t for t in workflow.tasks if t.name == "Undercut").runs_on = ["liftout"]
+
+    lamella = experiment.get_lamella_by_name("L1")
+    assert m._should_skip(lamella, "Undercut") == "not_for_this_role"
+
+
+def _step(runs_on) -> AutoLamellaTaskDescription:
+    return AutoLamellaTaskDescription.from_dict(
+        {"name": "Trench", "supervise": False, "required": False, "runs_on": runs_on}
+    )
+
+
+@pytest.mark.parametrize(
+    "written,loaded",
+    [
+        (["Liftout ", "lamella"], ["liftout", "lamella"]),  # case is forgiven
+        (["liftuot", "lamella"], ["lamella"]),  # an unknown role is dropped
+        (["lamella", "lamella"], ["lamella"]),  # and a repeat
+    ],
+)
+def test_runs_on_is_read_against_the_known_roles(written, loaded):
+    assert _step(written).runs_on == loaded
+
+
+def test_a_bare_string_runs_on_is_refused_not_converted():
+    """Converting "liftout" to the default would run a liftout step on every
+    ordinary lamella. Refused, the step runs on nothing -- and says so."""
+    step = _step("liftout")
+
+    assert step.runs_on == []
+    issues = AutoLamellaWorkflowConfig(tasks=[step]).validate()
+    assert any("runs on no lamella roles" in issue for issue in issues)
+
+
+def test_a_lamella_role_round_trips_and_an_unknown_one_is_kept(tmp_path):
+    """Kept, not defaulted: an ordinary lamella would run ordinary steps."""
+    experiment = make_experiment(tmp_path, lamella_names=["L1"])
+    lamella = experiment.get_lamella_by_name("L1")
+    lamella.role = "liftout"
+    assert Lamella.from_dict(lamella.to_dict()).role == "liftout"
+    assert Lamella.from_dict(lamella.to_dict()).is_liftout_block
+
+    ddict = lamella.to_dict()
+    ddict["role"] = "liftuot"
+    assert Lamella.from_dict(ddict).role == "liftuot"
+
+
+def test_only_one_lamella_can_be_the_liftout_block(tmp_path):
+    """Giving the role to one takes it from the other -- the old code's rule."""
+    experiment = make_experiment(tmp_path, lamella_names=["L1", "L2"])
+    first, second = experiment.positions
+
+    assert experiment.set_lamella_role(first, "liftout") == []
+    assert experiment.set_lamella_role(second, "liftout") == [first]
+    assert (first.role, second.role) == ("lamella", "liftout")
+
+
+def test_an_unknown_role_cannot_be_given(tmp_path):
+    experiment = make_experiment(tmp_path, lamella_names=["L1"])
+    with pytest.raises(ValueError, match="Unknown lamella role"):
+        experiment.set_lamella_role(experiment.positions[0], "liftuot")
+
+
 # ── _run_queue: mid-run queue edits ───────────────────────────────────────────
 
 

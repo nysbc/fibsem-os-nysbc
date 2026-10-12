@@ -164,7 +164,8 @@ class HookContext:
     # webhook, and a traceback is unbounded. The logfile has the full one.
     error: Optional[str] = None
     # Why a task was skipped, on TASK_SKIPPED. The producer decides the vocabulary;
-    # AutoLamella uses not_required / failure / missing_prereqs / lamella_not_found.
+    # AutoLamella uses not_required / failure / missing_prereqs / lamella_not_found /
+    # not_for_this_role.
     skip_reason: Optional[str] = None
     timestamp: float = field(default_factory=time.time)
 
