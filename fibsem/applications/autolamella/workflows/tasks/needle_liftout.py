@@ -547,14 +547,6 @@ class NeedleLiftoutTaskConfig(AutoLamellaTaskConfig):
             advanced=True,
         ),
     )
-    for_liftout: bool = field(
-        default=True,
-        metadata=field_meta(
-            tooltip="Marks this task as part of a liftout protocol. Not enforced by "
-            "the workflow yet: choose the lamella it runs on in the Workflow tab.",
-            advanced=True,
-        ),
-    )
 
     # Declared last so it renders at the bottom of the parameter form.
     steps: List[NeedleLoopStep] = field(

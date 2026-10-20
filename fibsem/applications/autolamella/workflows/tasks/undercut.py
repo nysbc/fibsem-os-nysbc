@@ -3,7 +3,7 @@
 import logging
 from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import ClassVar, List, Literal, Optional, Type
+from typing import ClassVar, Dict, List, Literal, Optional, Tuple, Type
 
 import numpy as np
 
@@ -22,8 +22,61 @@ from fibsem.applications.autolamella.workflows.tasks.base import AutoLamellaTask
 from fibsem.applications.autolamella.workflows.tasks.trench import MillTrenchTaskConfig
 from fibsem.applications.autolamella.workflows.ui import ask_user
 from fibsem.autofunctions.charge_neutralisation import auto_charge_neutralisation
-from fibsem.detection.detection import LamellaBottomEdge, LamellaCentre, LamellaTopEdge
+from fibsem.detection.detection import (
+    Feature,
+    LamellaBottomEdge,
+    LamellaCentre,
+    LamellaLeftEdge,
+    LamellaRightEdge,
+    LamellaTopEdge,
+    VolumeBlockBottomEdge,
+    VolumeBlockCentre,
+    VolumeBlockTopEdge,
+)
 from fibsem.structures import BeamType, ImageSettings, field_meta
+
+# The features the undercut can align to, by the name the protocol stores. One
+# feature serves both alignments: the first, at Initial Feature Alignment HFW, and
+# the re-centre after each tilt.
+ALIGN_FEATURES: Dict[str, Type[Feature]] = {
+    "LamellaCentre": LamellaCentre,
+    "VolumeBlockCentre": VolumeBlockCentre,
+}
+
+# The edges an undercut pattern can be placed from, by stored name: (top, bottom).
+# Which of the pair is used follows the scan rotation; see get_placement_edge.
+PLACEMENT_EDGES: Dict[str, Tuple[Type[Feature], Type[Feature]]] = {
+    "LamellaEdge": (LamellaTopEdge, LamellaBottomEdge),
+    "VolumeBlockEdge": (VolumeBlockTopEdge, VolumeBlockBottomEdge),
+}
+
+# What Auto Abort and the trench-size gate have been developed for. Only these
+# features carry pix_threshold, and only their detection ever reports a failure
+# (detection.detect_lamella), so for any other feature both checks would silently
+# do nothing. They are skipped instead, and the task says so.
+LAMELLA_FEATURES: Tuple[Type[Feature], ...] = (
+    LamellaCentre,
+    LamellaLeftEdge,
+    LamellaRightEdge,
+    LamellaTopEdge,
+    LamellaBottomEdge,
+)
+
+
+def get_placement_edge(name: str, scan_rotation: float) -> Feature:
+    """The edge to place an undercut pattern from, for a Pattern Placement Feature.
+
+    The top edge at 0 scan rotation; any other rotation flips the image, so the
+    bottom edge. _run offsets the pattern by the same test (+height/2 at 0,
+    -height/2 otherwise), so the edge and the offset cannot disagree. A fresh
+    instance on every call, because detection writes its results onto the feature.
+
+    Args:
+        name: a key of PLACEMENT_EDGES.
+        scan_rotation: the ion beam scan rotation, in radians.
+    """
+    top, bottom = PLACEMENT_EDGES[name]
+    return top() if np.isclose(scan_rotation, 0) else bottom()
 
 
 @dataclass
@@ -46,28 +99,55 @@ class MillUndercutTaskConfig(AutoLamellaTaskConfig):
 
     model_checkpoint: str = field(
         default="autolamella-waffle-20240107.pt",
-        metadata=field_meta(tooltip= "ML model checkpoint")
+        metadata=field_meta(tooltip="ML model checkpoint"),
     )
 
-    for_liftout: bool = field(
-        default=False,
+    align_feature: str = field(
+        default="LamellaCentre",
         metadata=field_meta(
-            tooltip= "Whether the undercut task is being performed for a liftout protocol. Enabling this flag means this will run only for the lamella marked as for liftout block."
+            label="Alignment Feature",
+            tooltip="The feature to align to: first at Initial Feature Alignment HFW, "
+            "then again after each tilt to an undercut angle.",
+            items=tuple(ALIGN_FEATURES),
+        ),
+    )
+
+    align_feature_hfw: float = field(
+        default=fcfg.REFERENCE_HFW_HIGH,
+        metadata=field_meta(
+            label="Initial Feature Alignment HFW",
+            tooltip="The field of view for the first alignment to the Alignment "
+            "Feature. A larger target, such as a liftout block, needs a wider view.",
+            unit="m",
+            scale=1e6,
+            minimum=0.0,
+        ),
+    )
+
+    pattern_placement_feature: str = field(
+        default="LamellaEdge",
+        metadata=field_meta(
+            label="Pattern Placement Feature",
+            tooltip="The edge each undercut pattern is placed from: the top edge at "
+            "0 degree scan rotation, the bottom edge otherwise.",
+            items=tuple(PLACEMENT_EDGES),
         ),
     )
 
     auto_abort: bool = field(
         default=True,
         metadata=field_meta(
-            tooltip= "Auto abort the step and mark lamella as defect if ML detection for undercut fails. This allows overmilling to be avoided on lamellae where detections went wrong"
+            tooltip="Auto abort the step and mark lamella as defect if ML detection for undercut fails. This allows overmilling to be avoided on lamellae where detections went wrong. "
+            "Lamella features only: ignored when the Alignment Feature is not a lamella feature."
         ),
     )
 
     gate_det_based_on_trench_milling: bool = field(
         default=False,
         metadata=field_meta(
-            tooltip= "WARNING: Experimental feature: Add measure for ML detection based on Trench milling step, estimates lamella size of undercut from known geometry from trench milling"
-            + "Helps make ML detection more robust and makes sure bad detections do not ruin sample, Trench milling step must precede undercut. Built primarily for Waffle Method"
+            tooltip="WARNING: Experimental feature: Add measure for ML detection based on Trench milling step, estimates lamella size of undercut from known geometry from trench milling. "
+            + "Helps make ML detection more robust and makes sure bad detections do not ruin sample, Trench milling step must precede undercut. Built primarily for Waffle Method. "
+            + "Lamella features only: ignored when the Alignment Feature is not a lamella feature."
         ),
     )
 
@@ -87,7 +167,41 @@ class MillUndercutTask(AutoLamellaTask):
     config: MillUndercutTaskConfig
     config_cls: ClassVar[Type[MillUndercutTaskConfig]] = MillUndercutTaskConfig
 
+    @property
+    def _lamella_feature(self) -> bool:
+        """Whether the Alignment Feature is a lamella feature, which Auto Abort and
+        the trench-size gate need. See LAMELLA_FEATURES."""
+        return issubclass(ALIGN_FEATURES[self.config.align_feature], LAMELLA_FEATURES)
+
+    def _validate_config(self) -> None:
+        """Fail before anything moves, with a message that says what to fix."""
+        if self.config.align_feature not in ALIGN_FEATURES:
+            raise ValueError(
+                f"{self.task_name}: unknown Alignment Feature "
+                f"'{self.config.align_feature}'. Expected one of "
+                f"{tuple(ALIGN_FEATURES)}."
+            )
+        if self.config.pattern_placement_feature not in PLACEMENT_EDGES:
+            raise ValueError(
+                f"{self.task_name}: unknown Pattern Placement Feature "
+                f"'{self.config.pattern_placement_feature}'. Expected one of "
+                f"{tuple(PLACEMENT_EDGES)}."
+            )
+        if self.config.align_feature_hfw <= 0:
+            raise ValueError(
+                f"{self.task_name}: Initial Feature Alignment HFW must be positive."
+            )
+
     def _run(self) -> None:
+        self._validate_config()
+        if not self._lamella_feature and (
+            self.config.auto_abort or self.config.gate_det_based_on_trench_milling
+        ):
+            logging.warning(
+                f"{self.task_name}: Auto Abort and the trench-size gate support "
+                f"lamella features only; both are ignored for "
+                f"{self.config.align_feature}."
+            )
 
         # bookkeeping
         image_settings = self.config.imaging
@@ -106,13 +220,8 @@ class MillUndercutTask(AutoLamellaTask):
         # change image hfw for aligning
         align_coincident_image_settings = deepcopy(image_settings)
 
-        align_feature_hfw = fcfg.REFERENCE_HFW_HIGH
-        # if lamella is used for liftout, we expect it to be large and require a larger hfw for alignment
-        if self.config.for_liftout:
-            align_feature_hfw = fcfg.REFERENCE_HFW_INIT_NEEDLE_VIEW_IB
-
         # align feature coincident
-        feature = LamellaCentre()
+        feature = ALIGN_FEATURES[self.config.align_feature]()
         lamella = align_feature_coincident(
             microscope=self.microscope,
             image_settings=align_coincident_image_settings,
@@ -121,7 +230,7 @@ class MillUndercutTask(AutoLamellaTask):
             parent_ui=self.parent_ui,
             validate=self.validate,
             feature=feature,
-            hfw=align_feature_hfw,
+            hfw=self.config.align_feature_hfw,
         )
 
         self._save_images_for_ml_training(
@@ -166,15 +275,18 @@ class MillUndercutTask(AutoLamellaTask):
             # get pattern
             scan_rotation = self.microscope.get_scan_rotation(beam_type=BeamType.ION)
 
-            # once tilted, realign to centre of lamella
+            # once tilted, realign to the alignment feature
             image_settings.hfw = self.config.milling[
                 UNDERCUT_KEY
             ].field_of_view  # change hfw for detection to match milling fov
             image_settings.beam_type = BeamType.ION
 
-            undercut_feature = LamellaCentre()
+            # fresh each tilt: detection writes its results onto the feature
+            undercut_feature = ALIGN_FEATURES[self.config.align_feature]()
 
-            if self.config.gate_det_based_on_trench_milling:
+            # the size gate and the abort are lamella-only (see LAMELLA_FEATURES);
+            # the alignment between them runs for every feature
+            if self._lamella_feature and self.config.gate_det_based_on_trench_milling:
                 lamella_pix = self._estimate_lamella_size(
                     image_settings=image_settings, tilt=undercut_milling_angle
                 )
@@ -190,7 +302,11 @@ class MillUndercutTask(AutoLamellaTask):
                 feature=undercut_feature,
             )
 
-            if not detected_successfully and self.config.auto_abort:
+            if (
+                self._lamella_feature
+                and not detected_successfully
+                and self.config.auto_abort
+            ):
                 # need to mark lamella as failed?
                 # should not continue with the rest of the step
                 # Only valid when unsupervised, when supervised, user will make decision
@@ -216,9 +332,7 @@ class MillUndercutTask(AutoLamellaTask):
                     break
 
             features = [
-                LamellaTopEdge()
-                if np.isclose(scan_rotation, 0)
-                else LamellaBottomEdge()
+                get_placement_edge(self.config.pattern_placement_feature, scan_rotation)
             ]
 
             det_Edge = update_detection_ui(
@@ -247,6 +361,7 @@ class MillUndercutTask(AutoLamellaTask):
             # top/bottom edge detection y point
             det_y = float(det_Edge.features[0].feature_m.y)
 
+            # the same test as get_placement_edge: top edge and +offset at 0
             det_y += offset if np.isclose(scan_rotation, 0) else -offset
             # current_milling_config.stages[0].pattern.point.y += det_y
             current_milling_config.stages[0].pattern.point.y = (
@@ -281,7 +396,6 @@ class MillUndercutTask(AutoLamellaTask):
 
         # write pose
         self.lamella.milling_pose = self.microscope.get_microscope_state()
-
 
         # acquire reference images
         self._acquire_set_of_reference_images(image_settings)
