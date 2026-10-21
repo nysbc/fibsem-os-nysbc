@@ -1106,7 +1106,7 @@ class NeedleLiftoutTask(AutoLamellaTask):
                 parent_ui=self.parent_ui,
                 # only ask on the last one
                 validate=self.validate and i == repeats - 1,
-                on_refresh=lambda: self._refresh(step),
+                # on_refresh=lambda: self._refresh(step), # not necessary to image constantly when doing liftout relative moves
                 stop_event=self._stop_event,
             )
 
