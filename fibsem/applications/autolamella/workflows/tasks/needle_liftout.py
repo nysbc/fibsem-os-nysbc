@@ -53,7 +53,7 @@ from fibsem.applications.autolamella.workflows.needle import (
 from fibsem.applications.autolamella.workflows.tasks.base import AutoLamellaTask
 from fibsem.applications.autolamella.workflows.ui import ask_user, update_detection_ui
 from fibsem.detection import detection
-from fibsem.detection.detection import DetectedFeatures, Feature
+from fibsem.detection.detection import DetectedFeatures, Feature, NeedleTip
 from fibsem.milling import FibsemMillingStage
 from fibsem.milling.tasks import FibsemMillingTaskConfig
 from fibsem.structures import BeamType, FibsemImage, Point, field_meta
@@ -81,16 +81,19 @@ def _feature_label(name: Any) -> str:
 
 
 def resolve_feature_name(name: str, flip: bool = False) -> Optional[Feature]:
-    """Resolve a feature by class name, optionally swapping Top <-> Bottom.
+    """Resolve a feature by class name, optionally flipping it for scan rotation.
 
     The same physical edge appears at the top or the bottom of the image depending
-    on scan rotation. Deriving the flipped name keeps the protocol flat -- one
-    string per feature -- rather than needing a second field for the pair.
+    on scan rotation, and the needle tip on the right or the left. Names describe
+    the 0 degree view; ``flip`` gives the 180 degree one. Deriving the flipped
+    feature keeps the protocol flat -- one string per feature -- rather than
+    needing a second field for the pair.
 
     Args:
         name: feature class name, e.g. ``"VolumeBlockBottomEdge"``. Empty returns
             None (not configured).
-        flip: swap Top/Bottom in the name, when the flipped feature exists.
+        flip: swap Top/Bottom in the name, when the flipped feature exists, and
+            point a NeedleTip at its left end rather than its right.
 
     Raises:
         ValueError: ``name`` is not a known feature.
@@ -113,7 +116,13 @@ def resolve_feature_name(name: str, flip: bool = False) -> Optional[Feature]:
             f"Unknown detection feature '{name}'. "
             f"Valid features are: {', '.join(FEATURE_NAMES)}"
         )
-    return detection.get_feature(name)
+    feature = detection.get_feature(name)
+
+    # Only the needle tip swaps sides: other Left/Right features keep theirs, so
+    # protocols built on them are unchanged.
+    if flip and isinstance(feature, NeedleTip):
+        feature.edge = "left"
+    return feature
 
 
 def _distance_meta(label: str, tooltip: str, **kwargs: Any) -> Dict[str, Any]:
@@ -535,8 +544,9 @@ class NeedleLiftoutTaskConfig(AutoLamellaTaskConfig):
     flip_features_with_scan_rotation: bool = field(
         default=True,
         metadata=field_meta(
-            tooltip="At 180 degree scan rotation, swap Top/Bottom in feature names: "
-            "a bottom edge appears at the top of the image.",
+            tooltip="At 180 degree scan rotation, swap Top/Bottom in feature names "
+            "and find the NeedleTip at the needle's left end: a bottom edge appears "
+            "at the top of the image, and the needle comes in from the other side.",
             advanced=True,
         ),
     )
@@ -739,7 +749,8 @@ class NeedleLiftoutTask(AutoLamellaTask):
 
     @property
     def _should_flip(self) -> bool:
-        """Whether feature names flip Top/Bottom at the current scan rotation."""
+        """Whether feature names flip at the current scan rotation. The ion beam's
+        is read for both views: the two beams are always rotated together."""
         if not self.config.flip_features_with_scan_rotation:
             return False
         scan_rotation = self.microscope.get_scan_rotation(beam_type=BeamType.ION)

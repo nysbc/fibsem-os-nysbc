@@ -8,25 +8,36 @@ refused before anything moves.
 
 from pathlib import Path
 
+import numpy as np
 import pytest
 
+import fibsem.utils as utils
 from fibsem.applications.autolamella.structures import Lamella
 from fibsem.applications.autolamella.workflows.tasks import load_config
 from fibsem.applications.autolamella.workflows.tasks.needle_liftout import (
     NeedleLiftoutTask,
     NeedleLiftoutTaskConfig,
     NeedleLoopStep,
+    resolve_feature_name,
 )
+from fibsem.detection import detection
+from fibsem.microscopes.simulator import DemoMicroscope
+from fibsem.structures import BeamType
 
 
 def _config(**kwargs) -> NeedleLiftoutTaskConfig:
     return NeedleLiftoutTaskConfig(task_name="Needle Liftout", **kwargs)
 
 
-def _task(config: NeedleLiftoutTaskConfig) -> NeedleLiftoutTask:
+def _task(config: NeedleLiftoutTaskConfig, microscope=None) -> NeedleLiftoutTask:
     """Enough of a task to validate a config: validation reads only the config."""
     lamella = Lamella(path=Path("/tmp/needle-liftout-test"), number=1, petname="01")
-    return NeedleLiftoutTask(microscope=None, config=config, lamella=lamella)
+    return NeedleLiftoutTask(microscope=microscope, config=config, lamella=lamella)
+
+
+@pytest.fixture(scope="module")
+def microscope() -> DemoMicroscope:
+    return DemoMicroscope(utils.load_microscope_configuration().system)
 
 
 def _aimed(**kwargs) -> NeedleLoopStep:
@@ -166,3 +177,54 @@ def test_an_unknown_feature_is_refused():
     config = _config(steps=[_aimed(from_feature_eb="NotAFeature")])
     with pytest.raises(ValueError, match="invalid From Feature"):
         _task(config)._validate_config(config.enabled_steps)
+
+
+# ---------------------------------------------------------------------------
+# Scan rotation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("scan_rotation, edge", [(0.0, "right"), (np.pi, "left")])
+def test_the_needle_tip_follows_scan_rotation(microscope, scan_rotation, edge):
+    """At 180 degrees the image is rotated, so the needle comes in from the other
+    side and its tip is its leftmost point, not its rightmost."""
+    microscope.set_scan_rotation(scan_rotation, beam_type=BeamType.ION)
+    task = _task(_config(), microscope=microscope)
+
+    feature = task._feature("NeedleTip")
+
+    assert feature.name == "NeedleTip"
+    assert feature.edge == edge
+
+
+def test_the_needle_tip_flip_can_be_turned_off(microscope):
+    microscope.set_scan_rotation(np.pi, beam_type=BeamType.ION)
+    task = _task(_config(flip_features_with_scan_rotation=False), microscope)
+
+    assert task._feature("NeedleTip").edge == "right"
+
+
+@pytest.mark.parametrize(
+    "name, flipped",
+    [
+        ("NeedleTipBottom", "NeedleTipBottom"),  # there is no NeedleTipTop
+        ("LamellaLeftEdge", "LamellaLeftEdge"),  # only the needle swaps sides
+        ("VolumeBlockBottomEdge", "VolumeBlockTopEdge"),  # Top/Bottom as before
+    ],
+)
+def test_what_flips_at_180(name, flipped):
+    assert resolve_feature_name(name, flip=True).name == flipped
+
+
+def test_a_left_needle_tip_finds_the_end_away_from_the_border():
+    """A needle entering from the right: the default right edge finds where it
+    enters the image instead of its tip."""
+    mask = np.zeros((100, 200), dtype=np.uint8)
+    mask[40:51, 60:] = 3  # manipulator from x=60 out to the right border
+    img = np.zeros_like(mask)
+
+    left = detection.NeedleTip(edge="left").detect(img=img, mask=mask)
+    right = detection.NeedleTip().detect(img=img, mask=mask)
+
+    assert (left.x, left.y) == (60, 45)
+    assert (right.x, right.y) == (199, 45)

@@ -81,11 +81,14 @@ class NeedleTip(Feature):
     name: str = "NeedleTip"
     class_id: int = 3
     class_name: str = "manipulator"
+    # the side of the image the tip points to: "left" when the image is scan
+    # rotated 180 degrees and the needle comes in from the other side
+    edge: str = "right"
 
     def detect(
         self, img: np.ndarray, mask: np.ndarray = None, point: Point = None
     ) -> "NeedleTip":
-        self.px = detect_needle_v5(mask, idx=self.class_id, edge="right")
+        self.px = detect_needle_v5(mask, idx=self.class_id, edge=self.edge)
         return self.px
 
 
@@ -575,7 +578,9 @@ def detect_centre_point(mask: np.ndarray, threshold: int = 500) -> Point:
         # centre coordinate as tuple
         centre_px = Point(x=x_mid, y=y_mid)
     else:
-        logging.warning(f'Detected Threshold {len(idx[0])} Did not meet threshold value {threshold}')
+        logging.warning(
+            f"Detected Threshold {len(idx[0])} Did not meet threshold value {threshold}"
+        )
     return centre_px
 
 
@@ -635,7 +640,9 @@ def detect_median_edge(mask: np.ndarray, edge: str, threshold: int = 250) -> Poi
         except Exception as e:
             logging.warning(f"Error detecting edge: {e}")
     else:
-        logging.warning(f'Detected Threshold {len(edge_mask[0])} Did not meet threshold value {threshold}')
+        logging.warning(
+            f"Detected Threshold {len(edge_mask[0])} Did not meet threshold value {threshold}"
+        )
     return Point(x=int(edge_px.x), y=int(edge_px.y))
 
 
@@ -731,13 +738,19 @@ def detect_lamella(
 
     if isinstance(feature, LamellaRightEdge):
         # px = detect_corner(lamella_mask, left=False)
-        px = detect_median_edge(lamella_mask, edge="right", threshold=feature.pix_threshold)
+        px = detect_median_edge(
+            lamella_mask, edge="right", threshold=feature.pix_threshold
+        )
 
     if isinstance(feature, LamellaTopEdge):
-        px = detect_median_edge(lamella_mask, edge="top", threshold=feature.pix_threshold)
+        px = detect_median_edge(
+            lamella_mask, edge="top", threshold=feature.pix_threshold
+        )
 
     if isinstance(feature, LamellaBottomEdge):
-        px = detect_median_edge(lamella_mask, edge="bottom", threshold=feature.pix_threshold)
+        px = detect_median_edge(
+            lamella_mask, edge="bottom", threshold=feature.pix_threshold
+        )
 
     if np.isclose(0, px.x) or np.isclose(0, px.y):
         feature.detect_success = False
