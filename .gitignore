@@ -64,6 +64,8 @@ fibsem/ui/test_qt.py
 scripts/dev-notebook2.ipynb
 scripts/launch-autolamella.sh
 fibsem/applications/autolamella/log/*
+fibsem/applications/salami/log/*
+!fibsem/applications/salami/log/.gitkeep
 fibsem/applications/autolamella/ml/*
 fibsem/fm/*.ome.tiff
 notes.md

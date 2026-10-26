@@ -1455,10 +1455,14 @@ class MicroscopeState:
     @staticmethod
     def from_dict(state_dict: dict) -> "MicroscopeState":
 
-        # beam, and detector settings are now optional
+        # stage position, beam, and detector settings are now optional
+        stage_position = None
         electron_beam, electron_detector = None, None
         ion_beam, ion_detector = None, None
 
+        # to_dict writes None for an unset stage position, so read it back as one.
+        if state_dict.get("stage_position", None) is not None:
+            stage_position = FibsemStagePosition.from_dict(state_dict["stage_position"])
         if state_dict.get("electron_beam", None) is not None:
             electron_beam = BeamSettings.from_dict(state_dict["electron_beam"])
         if state_dict.get("ion_beam", None) is not None:
@@ -1472,7 +1476,7 @@ class MicroscopeState:
 
         microscope_state = MicroscopeState(
             timestamp=state_dict["timestamp"],
-            stage_position=FibsemStagePosition.from_dict(state_dict["stage_position"]),
+            stage_position=stage_position,
             electron_beam=electron_beam,
             ion_beam=ion_beam,
             electron_detector=electron_detector,
