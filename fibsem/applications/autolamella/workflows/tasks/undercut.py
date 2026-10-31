@@ -37,17 +37,41 @@ from fibsem.structures import BeamType, ImageSettings, field_meta
 
 # The features the undercut can align to, by the name the protocol stores. One
 # feature serves both alignments: the first, at Initial Feature Alignment HFW, and
-# the re-centre after each tilt.
+# the re-centre after each tilt. An edge is centred in the view as a centre is.
 ALIGN_FEATURES: Dict[str, Type[Feature]] = {
     "LamellaCentre": LamellaCentre,
+    "LamellaTopEdge": LamellaTopEdge,
+    "LamellaBottomEdge": LamellaBottomEdge,
     "VolumeBlockCentre": VolumeBlockCentre,
+    "VolumeBlockTopEdge": VolumeBlockTopEdge,
+    "VolumeBlockBottomEdge": VolumeBlockBottomEdge,
 }
 
-# The edges an undercut pattern can be placed from, by stored name: (top, bottom).
-# Which of the pair is used follows the scan rotation; see get_placement_edge.
-PLACEMENT_EDGES: Dict[str, Tuple[Type[Feature], Type[Feature]]] = {
-    "LamellaEdge": (LamellaTopEdge, LamellaBottomEdge),
-    "VolumeBlockEdge": (VolumeBlockTopEdge, VolumeBlockBottomEdge),
+# The edges an undercut pattern can be placed from, by the name the protocol stores.
+PLACEMENT_EDGES: Dict[str, Type[Feature]] = {
+    "LamellaTopEdge": LamellaTopEdge,
+    "LamellaBottomEdge": LamellaBottomEdge,
+    "VolumeBlockTopEdge": VolumeBlockTopEdge,
+    "VolumeBlockBottomEdge": VolumeBlockBottomEdge,
+}
+
+# Each edge's opposite: what it appears as when 180 degree scan rotation flips
+# the image.
+_FLIPPED_EDGES: Dict[str, str] = {
+    "LamellaTopEdge": "LamellaBottomEdge",
+    "LamellaBottomEdge": "LamellaTopEdge",
+    "VolumeBlockTopEdge": "VolumeBlockBottomEdge",
+    "VolumeBlockBottomEdge": "VolumeBlockTopEdge",
+}
+
+_TOP_EDGES: Tuple[Type[Feature], ...] = (LamellaTopEdge, VolumeBlockTopEdge)
+
+# Before Top and Bottom were separate choices, the placement feature named the
+# pair, and the top edge was used at 0 degree scan rotation and the bottom edge
+# otherwise -- which is the top edge, flipped with scan rotation.
+_LEGACY_PLACEMENT_EDGES: Dict[str, str] = {
+    "LamellaEdge": "LamellaTopEdge",
+    "VolumeBlockEdge": "VolumeBlockTopEdge",
 }
 
 # What Auto Abort and the trench-size gate have been developed for. Only these
@@ -63,20 +87,35 @@ LAMELLA_FEATURES: Tuple[Type[Feature], ...] = (
 )
 
 
-def get_placement_edge(name: str, scan_rotation: float) -> Feature:
-    """The edge to place an undercut pattern from, for a Pattern Placement Feature.
+def get_placement_edge(
+    name: str, scan_rotation: float, flip_with_scan_rotation: bool
+) -> Feature:
+    """The edge to place an undercut pattern from.
 
-    The top edge at 0 scan rotation; any other rotation flips the image, so the
-    bottom edge. _run offsets the pattern by the same test (+height/2 at 0,
-    -height/2 otherwise), so the edge and the offset cannot disagree. A fresh
+    The chosen edge, or its opposite when ``flip_with_scan_rotation`` is set and the
+    image is scan rotated: the chosen edge then appears on the other side. Any
+    rotation other than 0 counts as flipped, as elsewhere in AutoLamella. A fresh
     instance on every call, because detection writes its results onto the feature.
 
     Args:
         name: a key of PLACEMENT_EDGES.
         scan_rotation: the ion beam scan rotation, in radians.
+        flip_with_scan_rotation: swap Top and Bottom when scan rotated.
     """
-    top, bottom = PLACEMENT_EDGES[name]
-    return top() if np.isclose(scan_rotation, 0) else bottom()
+    if flip_with_scan_rotation and not np.isclose(scan_rotation, 0):
+        name = _FLIPPED_EDGES[name]
+    return PLACEMENT_EDGES[name]()
+
+
+def placement_offset_sign(edge: Feature) -> int:
+    """Which way to offset a pattern from its edge: +1 (up) from a top edge, -1
+    (down) from a bottom edge, so the pattern sits outside the edge.
+
+    Keyed on the edge actually used, not on the scan rotation. With Top and Bottom
+    free choices, keying it on the scan rotation would offset a pattern placed
+    from a bottom edge at 0 degrees upwards, over the lamella.
+    """
+    return 1 if isinstance(edge, _TOP_EDGES) else -1
 
 
 @dataclass
@@ -107,7 +146,8 @@ class MillUndercutTaskConfig(AutoLamellaTaskConfig):
         metadata=field_meta(
             label="Alignment Feature",
             tooltip="The feature to align to: first at Initial Feature Alignment HFW, "
-            "then again after each tilt to an undercut angle.",
+            "then again after each tilt to an undercut angle. An edge is centred in "
+            "the view, as a centre is.",
             items=tuple(ALIGN_FEATURES),
         ),
     )
@@ -125,12 +165,22 @@ class MillUndercutTaskConfig(AutoLamellaTaskConfig):
     )
 
     pattern_placement_feature: str = field(
-        default="LamellaEdge",
+        default="LamellaTopEdge",
         metadata=field_meta(
             label="Pattern Placement Feature",
-            tooltip="The edge each undercut pattern is placed from: the top edge at "
-            "0 degree scan rotation, the bottom edge otherwise.",
+            tooltip="The edge each undercut pattern is placed from. The pattern sits "
+            "outside it: above a top edge, below a bottom edge.",
             items=tuple(PLACEMENT_EDGES),
+        ),
+    )
+
+    flip_placement_with_scan_rotation: bool = field(
+        default=True,
+        metadata=field_meta(
+            label="Flip Placement Edge with Scan Rotation",
+            tooltip="At 180 degree scan rotation, place from the opposite edge (Top "
+            "and Bottom swap): the image is flipped, so the chosen edge appears on "
+            "the other side.",
         ),
     )
 
@@ -159,6 +209,12 @@ class MillUndercutTaskConfig(AutoLamellaTaskConfig):
             self.milling = deepcopy(
                 {UNDERCUT_KEY: DEFAULT_MILLING_CONFIG[UNDERCUT_KEY]}
             )
+        # a protocol saved before Top and Bottom were separate choices; see
+        # _LEGACY_PLACEMENT_EDGES. Mapped rather than refused, so it mills the same.
+        legacy = _LEGACY_PLACEMENT_EDGES.get(self.pattern_placement_feature)
+        if legacy is not None:
+            self.pattern_placement_feature = legacy
+            self.flip_placement_with_scan_rotation = True
 
 
 class MillUndercutTask(AutoLamellaTask):
@@ -331,9 +387,12 @@ class MillUndercutTask(AutoLamellaTask):
                     )
                     break
 
-            features = [
-                get_placement_edge(self.config.pattern_placement_feature, scan_rotation)
-            ]
+            placement_edge = get_placement_edge(
+                self.config.pattern_placement_feature,
+                scan_rotation,
+                self.config.flip_placement_with_scan_rotation,
+            )
+            features = [placement_edge]
 
             det_Edge = update_detection_ui(
                 microscope=self.microscope,
@@ -361,8 +420,8 @@ class MillUndercutTask(AutoLamellaTask):
             # top/bottom edge detection y point
             det_y = float(det_Edge.features[0].feature_m.y)
 
-            # the same test as get_placement_edge: top edge and +offset at 0
-            det_y += offset if np.isclose(scan_rotation, 0) else -offset
+            # outside the edge actually used: see placement_offset_sign
+            det_y += placement_offset_sign(placement_edge) * offset
             # current_milling_config.stages[0].pattern.point.y += det_y
             current_milling_config.stages[0].pattern.point.y = (
                 deepcopy(milling_task_config.stages[i]).pattern.point.y + det_y
