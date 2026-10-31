@@ -1322,12 +1322,15 @@ class FiducialPattern(BasePattern[FibsemRectangleSettings]):
 
 @dataclass
 class UndercutPattern(BasePattern[FibsemRectangleSettings]):
+    """An L of two cuts: a horizontal trench centred on the point, and a vertical
+    cut at one end of it. Each cut has its own width and height."""
+
     width: float = field(
-        default=5.0e-6,
+        default=2.0e-6,
         metadata={
             "label": "Width",
             **DEFAULT_DISTANCE_METADATA,
-            "tooltip": "Width of the undercut pattern.",
+            "tooltip": "Width of the vertical cut.",
         },
     )
     height: float = field(
@@ -1335,7 +1338,7 @@ class UndercutPattern(BasePattern[FibsemRectangleSettings]):
         metadata={
             "label": "Height",
             **DEFAULT_DISTANCE_METADATA,
-            "tooltip": "Height of the undercut pattern.",
+            "tooltip": "Height of the vertical cut.",
         },
     )
     depth: float = field(
@@ -1347,27 +1350,35 @@ class UndercutPattern(BasePattern[FibsemRectangleSettings]):
         },
     )
     trench_width: float = field(
-        default=2.0e-6,
+        default=5.0e-6,
         metadata={
             "label": "Trench Width",
             **DEFAULT_DISTANCE_METADATA,
-            "tooltip": "Width of the trench in the undercut pattern.",
+            "tooltip": "Width of the horizontal cut (the trench).",
         },
     )
-    rhs_height: float = field(
-        default=10.0e-6,
+    trench_height: float = field(
+        default=2.0e-6,
         metadata={
-            "label": "RHS Height",
+            "label": "Trench Height",
             **DEFAULT_DISTANCE_METADATA,
-            "tooltip": "Height of the right-hand side of the undercut pattern.",
+            "tooltip": "Height of the horizontal cut (the trench).",
         },
     )
-    h_offset: float = field(
-        default=5.0e-6,
+    flip_horizontal: bool = field(
+        default=False,
         metadata={
-            "label": "Horizontal Offset",
-            **DEFAULT_DISTANCE_METADATA,
-            "tooltip": "Horizontal offset of the undercut pattern.",
+            "label": "Flip Horizontal",
+            "tooltip": "Mirror the L shape left to right: the vertical cut moves to "
+            "the left-hand side.",
+        },
+    )
+    flip_vertical: bool = field(
+        default=False,
+        metadata={
+            "label": "Flip Vertical",
+            "tooltip": "Mirror the L shape top to bottom: the vertical cut extends "
+            "upwards, and both cuts mill bottom to top.",
         },
     )
     cross_section: CrossSectionPattern = field(
@@ -1376,51 +1387,59 @@ class UndercutPattern(BasePattern[FibsemRectangleSettings]):
 
     name: ClassVar[str] = "Undercut"
 
+    @classmethod
+    def from_dict(cls, ddict: Dict[str, Any]) -> "UndercutPattern":
+        # The layout before each cut had its own size: width was the trench's
+        # width, trench_width was both the trench's height and the vertical cut's
+        # width, rhs_height was the vertical cut's height, and height and h_offset
+        # did nothing. rhs_height marks that layout. Translating it keeps a saved
+        # pattern exactly the shape it was, rather than changing what mills.
+        if "rhs_height" in ddict and "trench_height" not in ddict:
+            ddict = dict(ddict)
+            old_width = ddict.get("width", 5.0e-6)
+            old_trench_width = ddict.get("trench_width", 2.0e-6)
+            ddict["width"] = old_trench_width
+            ddict["height"] = ddict.pop("rhs_height")
+            ddict["trench_width"] = old_width
+            ddict["trench_height"] = old_trench_width
+        return super().from_dict(ddict)
+
     def define(self) -> List[FibsemRectangleSettings]:
-
         point = self.point
-        jcut_rhs_height = self.rhs_height
-        jcut_lamella_height = self.height
-        jcut_width = self.width
-        jcut_trench_thickness = self.trench_width
-        jcut_depth = self.depth
-        jcut_h_offset = self.h_offset
+        depth = self.depth
         cross_section = self.cross_section
+        # mirror about the point: x for the side the vertical cut is on, y for the
+        # way it extends. A vertical mirror also reverses the scan direction, as
+        # TrenchPattern's lower trench mirrors its upper one.
+        flip_x = -1 if self.flip_horizontal else 1
+        flip_y = -1 if self.flip_vertical else 1
+        scan_direction = "BottomToTop" if self.flip_vertical else "TopToBottom"
 
-        # top_jcut
-        jcut_top_centre_x = point.x + jcut_width / 2 - jcut_h_offset
-        jcut_top_centre_y = point.y + jcut_lamella_height
-        jcut_top_width = jcut_width
-        jcut_top_height = jcut_trench_thickness
-        jcut_top_depth = jcut_depth
-
-        top_pattern = FibsemRectangleSettings(
-            width=jcut_top_width,
-            height=jcut_top_height,
-            depth=jcut_top_depth,
+        # the horizontal cut (the trench), centred on the point
+        trench_pattern = FibsemRectangleSettings(
+            width=self.trench_width,
+            height=self.trench_height,
+            depth=depth,
             centre_x=point.x,
             centre_y=point.y,
-            scan_direction="TopToBottom",
-            cross_section=cross_section,
-        )
-        # rhs jcut
-        jcut_rhs_centre_x = point.x + (jcut_width / 2) - jcut_trench_thickness / 2
-        jcut_rhs_centre_y = point.y - (jcut_rhs_height / 2) + jcut_trench_thickness / 2
-        jcut_rhs_width = jcut_trench_thickness
-        jcut_rhs_height = jcut_rhs_height
-        jcut_rhs_depth = jcut_depth
-
-        rhs_pattern = FibsemRectangleSettings(
-            width=jcut_rhs_width,
-            height=jcut_rhs_height,
-            depth=jcut_rhs_depth,
-            centre_x=jcut_rhs_centre_x,
-            centre_y=jcut_rhs_centre_y,
-            scan_direction="TopToBottom",
+            scan_direction=scan_direction,
             cross_section=cross_section,
         )
 
-        self.shapes = [top_pattern, rhs_pattern]
+        # the vertical cut, at the trench's right-hand end: its outer edge flush
+        # with the trench's end and its top flush with the trench's top, extending
+        # down. The flips mirror both offsets.
+        vertical_pattern = FibsemRectangleSettings(
+            width=self.width,
+            height=self.height,
+            depth=depth,
+            centre_x=point.x + flip_x * (self.trench_width / 2 - self.width / 2),
+            centre_y=point.y + flip_y * (self.trench_height / 2 - self.height / 2),
+            scan_direction=scan_direction,
+            cross_section=cross_section,
+        )
+
+        self.shapes = [trench_pattern, vertical_pattern]
         return self.shapes
 
 
