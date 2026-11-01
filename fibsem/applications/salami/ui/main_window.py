@@ -128,6 +128,12 @@ class SalamiMainWindow(QMainWindow):
         imaging_menu = menu_bar.addMenu("Imaging")
         self.salami_ui.add_imaging_menu_actions(imaging_menu)
 
+        tools_menu = menu_bar.addMenu("Tools")
+        self.salami_ui.add_tools_menu_actions(tools_menu)
+
+        help_menu = menu_bar.addMenu("Help")
+        self.salami_ui.add_help_menu_actions(help_menu)
+
     def _create_corner_widget(self) -> None:
         """Experiment name, New/Open buttons and the notification bell, on the tab bar.
 

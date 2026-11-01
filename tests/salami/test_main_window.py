@@ -358,3 +358,47 @@ def test_bell_records_workflow_events_not_chatter(window, tmp_path):
 
     ui._on_run_finished(RuntimeError("detector fault"))
     assert window.notification_bell.count == 2
+
+
+def test_tools_and_help_menus_mirror_autolamella(window):
+    menus = {a.text(): a.menu() for a in window.menuBar().actions()}
+    assert list(menus) == ["File", "Edit", "View", "Imaging", "Tools", "Help"]
+
+    tools = [a.text() or "---" for a in menus["Tools"].actions()]
+    assert tools == [
+        "Scripts",
+        "---",
+        "Guided Setup...",
+        "Plugins...",
+        "Create Desktop Shortcut...",
+    ]
+    assert [a.text() for a in menus["Help"].actions()] == ["About"]
+
+
+def test_scripts_need_an_experiment_and_an_idle_workflow(window, tmp_path):
+    from fibsem.applications.salami.scripting import SalamiScriptContext
+
+    ui = window.salami_ui
+    context, reason = ui._script_context()
+    assert context is None and "experiment" in reason
+
+    ui._adopt_experiment(SalamiExperiment.create(parent_dir=str(tmp_path), name="s"))
+    context, reason = ui._script_context()
+    assert isinstance(context, SalamiScriptContext) and reason == ""
+    assert context.path == tmp_path / "s"
+    context.save()  # writes the protocol and status back without error
+
+
+def test_salami_shortcut_points_at_salami(monkeypatch, tmp_path):
+    from fibsem.applications.salami import desktop_shortcut
+
+    assert desktop_shortcut.shortcut_path(tmp_path).stem == "Salami"
+    looked_for = []
+    monkeypatch.setattr(
+        desktop_shortcut,
+        "find_entry_point",
+        lambda name: looked_for.append(name) or None,
+    )
+    with pytest.raises(FileNotFoundError):
+        desktop_shortcut.create_desktop_shortcut(directory=tmp_path)
+    assert looked_for == ["salami-ui"]

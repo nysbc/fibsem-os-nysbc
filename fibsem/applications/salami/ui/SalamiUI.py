@@ -17,6 +17,7 @@ from PyQt5.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -201,6 +202,8 @@ class SalamiUI(SalamiMainUI.Ui_MainWindow, QMainWindow):
         self._setup_edit_menu()
         self._setup_view_menu()
         self._setup_imaging_menu()
+        self._setup_tools_menu()
+        self._setup_help_menu()
 
         # Setup runs setup_experiment in a worker thread so ask_user prompts
         # can be serviced by the main thread.
@@ -528,6 +531,165 @@ class SalamiUI(SalamiMainUI.Ui_MainWindow, QMainWindow):
             logging.info("F11 autofocus: no SEM/FIB view selected, or not connected")
             return
         image_widget.run_autofocus()
+
+    # ------------------------------------------------------------------
+    # Tools and Help menus
+    # ------------------------------------------------------------------
+
+    def _setup_tools_menu(self) -> None:
+        """Scripts, then the install-level tools: AutoLamella's, less Reporting."""
+        from fibsem.applications.salami.scripting import get_scripts_directory
+        from fibsem.ui.widgets.script_menu import ScriptMenuController
+
+        # A QMenu of its own so the standalone and shell Tools menus can both
+        # hold it. The controller adds its two fixed entries and never touches
+        # the scripts folder until the manager is opened.
+        self.menuScripts = QMenu("Scripts", self)
+        self.script_menu_controller = ScriptMenuController(
+            menu=self.menuScripts,
+            scripts_directory=get_scripts_directory,
+            context_factory=self._script_context,
+            notify=lambda message, level: self.toast_manager.show_toast(message, level),
+            parent=self,
+        )
+
+        self.action_guided_setup = QAction("Guided Setup...", self)
+        # NoRole: Qt's text heuristic moves actions starting with "setup",
+        # "preference" and the like into the application menu (see AutoLamella).
+        self.action_guided_setup.setMenuRole(QAction.NoRole)
+        self.action_guided_setup.setToolTip(
+            "A guided walkthrough that configures fibsemOS to work with your microscope"
+        )
+        self.action_guided_setup.triggered.connect(self._on_guided_setup)
+
+        self.action_show_plugins = QAction("Plugins...", self)
+        self.action_show_plugins.setToolTip(
+            "Show every registered pattern, strategy and task, and where it came from"
+        )
+        self.action_show_plugins.triggered.connect(self._on_show_plugins)
+
+        self.action_create_desktop_shortcut = QAction(
+            "Create Desktop Shortcut...", self
+        )
+        self.action_create_desktop_shortcut.setToolTip(
+            "Place a shortcut on your desktop that launches Salami from this "
+            "environment"
+        )
+        self.action_create_desktop_shortcut.triggered.connect(
+            self._on_create_desktop_shortcut
+        )
+
+        self.menuTools = self.menubar.addMenu("Tools")
+        self.add_tools_menu_actions(self.menuTools)
+
+    def add_tools_menu_actions(self, menu) -> None:
+        """Populate `menu` with the Tools actions, grouped as AutoLamella's are."""
+        menu.addMenu(self.menuScripts)
+        # Below the separator because these act on the install, not the experiment.
+        menu.addSeparator()
+        menu.addAction(self.action_guided_setup)
+        menu.addAction(self.action_show_plugins)
+        menu.addAction(self.action_create_desktop_shortcut)
+
+    def _setup_help_menu(self) -> None:
+        self.action_about = QAction("About", self)
+        self.action_about.triggered.connect(self.open_information_dialog)
+        self.menuHelp = self.menubar.addMenu("Help")
+        self.add_help_menu_actions(self.menuHelp)
+
+    def add_help_menu_actions(self, menu) -> None:
+        """Populate `menu` with the Help actions."""
+        menu.addAction(self.action_about)
+
+    def _script_context(self):
+        """(context, reason) for a script run; a reason disables running."""
+        from fibsem.applications.salami.scripting import SalamiScriptContext
+
+        if self.salamiExperiment is None:
+            return None, "Load an experiment to run scripts"
+        if self._workflow_busy():
+            # Tasks update the experiment on a worker thread, so a script
+            # reading it mid-run would get a torn snapshot.
+            return None, "Unavailable while a workflow is running"
+        return (
+            SalamiScriptContext(
+                experiment=self.salamiExperiment,
+                log=logging.info,
+                microscope=self.microscope,
+            ),
+            "",
+        )
+
+    def _workflow_busy(self) -> bool:
+        """Whether setup, a microscope sync or a run is in progress."""
+        return any(
+            thread is not None and thread.is_alive()
+            for thread in (self._setup_thread, self._sync_thread, self._run_thread)
+        )
+
+    def _on_guided_setup(self) -> None:
+        """Run the microscope guided setup, through the connection widget.
+
+        Delegated so whatever the wizard saves is selected as the configuration
+        the next connection uses, and the live microscope is handed over.
+        """
+        self.system_widget.run_guided_setup()
+
+    def _on_show_plugins(self) -> None:
+        """Open the read-only listing of registered extensions."""
+        from fibsem.ui.widgets.plugins_dialog import PluginsDialog
+
+        PluginsDialog(parent=self).exec_()
+
+    def _on_create_desktop_shortcut(self) -> None:
+        """Create a launcher shortcut for Salami, confirming overwrites."""
+        from pathlib import Path
+
+        from fibsem.applications.salami import desktop_shortcut
+
+        chosen = QFileDialog.getExistingDirectory(
+            self,
+            "Choose Shortcut Location",
+            str(desktop_shortcut.get_desktop_directory()),
+        )
+        if not chosen:
+            return
+        directory = Path(chosen)
+        try:
+            path = desktop_shortcut.create_desktop_shortcut(directory=directory)
+        except FileExistsError as exc:
+            reply = QMessageBox.question(
+                self,
+                "Create Desktop Shortcut",
+                f"A shortcut already exists at:\n{exc}\n\nReplace it?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+            try:
+                path = desktop_shortcut.create_desktop_shortcut(
+                    overwrite=True, directory=directory
+                )
+            except Exception as exc2:
+                self._show_shortcut_error(exc2)
+                return
+        except Exception as exc:
+            self._show_shortcut_error(exc)
+            return
+        notification_service.show_toast(f"Shortcut created: {path}", "info")
+
+    def _show_shortcut_error(self, exc: Exception) -> None:
+        logging.error(f"Failed to create desktop shortcut: {exc}")
+        QMessageBox.warning(
+            self,
+            "Create Desktop Shortcut",
+            f"Could not create the desktop shortcut:\n{exc}",
+        )
+
+    def open_information_dialog(self) -> None:
+        """Help > About. No connection guard: works before connecting too."""
+        fui.open_information_dialog(self.microscope, self, application="Salami")
 
     def create_new_experiment(self):
         """Create a new experiment, from the default protocol or a saved one."""
