@@ -4,6 +4,7 @@ import threading
 from typing import Optional
 
 from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import (
     QAction,
     QApplication,
@@ -198,6 +199,8 @@ class SalamiUI(SalamiMainUI.Ui_MainWindow, QMainWindow):
 
         self._setup_file_menu()
         self._setup_edit_menu()
+        self._setup_view_menu()
+        self._setup_imaging_menu()
 
         # Setup runs setup_experiment in a worker thread so ask_user prompts
         # can be serviced by the main thread.
@@ -397,6 +400,134 @@ class SalamiUI(SalamiMainUI.Ui_MainWindow, QMainWindow):
         cfg.save_user_preferences(prefs)
         save_salami_preferences(salami_prefs)
         self._apply_display_preferences(prefs)
+
+    # ------------------------------------------------------------------
+    # View and Imaging menus
+    # ------------------------------------------------------------------
+    #
+    # AutoLamella's, less its fluorescence entries: Salami has no FM. The F-key
+    # shortcuts live on the QActions, scoped with WidgetWithChildrenShortcut and
+    # added to this window, so they fire only when focus is on the Microscope
+    # page (or anywhere in it, standalone) and not on the Protocol page.
+
+    def _setup_view_menu(self) -> None:
+        self.action_toggle_fullscreen = QAction("Full Screen", self)
+        self.action_toggle_fullscreen.setCheckable(True)
+        self.action_toggle_fullscreen.setShortcut(QKeySequence(Qt.Key_F5))
+        self.action_toggle_fullscreen.setShortcutContext(Qt.WidgetWithChildrenShortcut)
+        self.action_toggle_fullscreen.triggered.connect(self._hotkey_toggle_fullscreen)
+
+        self.action_exit_fullscreen = QAction("Exit Full Screen", self)
+        self.action_exit_fullscreen.setShortcut(QKeySequence(Qt.Key_Escape))
+        self.action_exit_fullscreen.setShortcutContext(Qt.WidgetWithChildrenShortcut)
+        self.action_exit_fullscreen.triggered.connect(self._hotkey_exit_fullscreen)
+
+        self._fullscreen_view_actions = []
+        for label, key in (("SEM", BeamType.ELECTRON), ("FIB", BeamType.ION)):
+            action = QAction(label, self)
+            action.triggered.connect(
+                lambda _checked=False, k=key: self.view_controller.set_fullscreen(k)
+            )
+            self._fullscreen_view_actions.append(action)
+
+        self.addAction(self.action_toggle_fullscreen)
+        self.addAction(self.action_exit_fullscreen)
+
+        self.menuView = self.menubar.addMenu("View")
+        self.add_view_menu_actions(self.menuView)
+
+    def add_view_menu_actions(self, menu) -> None:
+        """Populate `menu` with the View actions, as AutoLamella's are."""
+        menu.addAction(self.action_toggle_fullscreen)
+        menu.addAction(self.action_exit_fullscreen)
+        fullscreen_menu = menu.addMenu("Full Screen View")
+        for action in self._fullscreen_view_actions:
+            fullscreen_menu.addAction(action)
+        # keep the checkable / enabled state honest each time the menu opens
+        menu.aboutToShow.connect(self._sync_view_menu)
+
+    def _sync_view_menu(self) -> None:
+        """Reflect whether a view is full-screened (check + Exit enabled)."""
+        fullscreen = self.view_controller.fullscreen is not None
+        self.action_toggle_fullscreen.setChecked(fullscreen)
+        self.action_exit_fullscreen.setEnabled(fullscreen)
+
+    def _hotkey_toggle_fullscreen(self) -> None:
+        """F5: toggle full screen for the selected view."""
+        self.view_controller.toggle_fullscreen()
+
+    def _hotkey_exit_fullscreen(self) -> None:
+        """Esc: exit full screen (no-op when already showing the grid)."""
+        self.view_controller.set_fullscreen(None)
+
+    def _setup_imaging_menu(self) -> None:
+        # Act on the selected view's beam: the view <-> radio sync keeps
+        # image_widget.beam_type aligned with the selected view.
+        self._imaging_actions = []
+        for label, key, handler in (
+            ("Acquire", Qt.Key_F2, self._hotkey_acquire),
+            ("Live Acquisition", Qt.Key_F6, self._hotkey_toggle_live),
+            ("Auto Contrast", Qt.Key_F9, self._hotkey_autocontrast),
+            ("Auto Focus", Qt.Key_F11, self._hotkey_autofocus),
+        ):
+            action = QAction(label, self)
+            action.setShortcut(QKeySequence(key))
+            action.setShortcutContext(Qt.WidgetWithChildrenShortcut)
+            action.triggered.connect(handler)
+            self.addAction(action)
+            self._imaging_actions.append(action)
+
+        self.menuImaging = self.menubar.addMenu("Imaging")
+        self.add_imaging_menu_actions(self.menuImaging)
+
+    def add_imaging_menu_actions(self, menu) -> None:
+        """Populate `menu` with the Imaging actions."""
+        for action in self._imaging_actions:
+            menu.addAction(action)
+
+    def _selected_image_widget(self):
+        """The image widget when a SEM/FIB view is selected and connected, else None."""
+        if self.view_controller.selected_view not in (BeamType.ELECTRON, BeamType.ION):
+            return None
+        return self.image_widget
+
+    def _hotkey_acquire(self) -> None:
+        """F2: acquire the selected view, unless an acquisition is already running."""
+        image_widget = self._selected_image_widget()
+        if image_widget is None:
+            logging.info("F2 acquire: no SEM/FIB view selected, or not connected")
+            return
+        if getattr(image_widget, "is_acquiring", False):
+            logging.info("F2 acquire: acquisition already in progress")
+            return
+        if self.view_controller.selected_view is BeamType.ELECTRON:
+            image_widget.acquire_sem_image()
+        else:
+            image_widget.acquire_fib_image()
+
+    def _hotkey_toggle_live(self) -> None:
+        """F6: toggle live acquisition on the selected beam."""
+        image_widget = self._selected_image_widget()
+        if image_widget is None:
+            logging.info("F6 live: no SEM/FIB view selected, or not connected")
+            return
+        image_widget.toggle_live_acquisition()
+
+    def _hotkey_autocontrast(self) -> None:
+        """F9: auto-contrast the selected beam."""
+        image_widget = self._selected_image_widget()
+        if image_widget is None:
+            logging.info("F9 autocontrast: no SEM/FIB view selected, or not connected")
+            return
+        image_widget.run_autocontrast()
+
+    def _hotkey_autofocus(self) -> None:
+        """F11: auto-focus the selected beam."""
+        image_widget = self._selected_image_widget()
+        if image_widget is None:
+            logging.info("F11 autofocus: no SEM/FIB view selected, or not connected")
+            return
+        image_widget.run_autofocus()
 
     def create_new_experiment(self):
         """Create a new experiment, from the default protocol or a saved one."""

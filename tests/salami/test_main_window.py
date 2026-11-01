@@ -298,6 +298,38 @@ def test_edit_menu_follows_file_and_holds_preferences(window):
     assert edit_menu.actions() == [window.salami_ui.actionPreferences]
 
 
+def test_view_and_imaging_menus_mirror_autolamella(window):
+    menus = {a.text(): a.menu() for a in window.menuBar().actions()}
+    assert list(menus)[:4] == ["File", "Edit", "View", "Imaging"]
+
+    view = [a.text() for a in menus["View"].actions()]
+    assert view == ["Full Screen", "Exit Full Screen", "Full Screen View"]
+    imaging = [(a.text(), a.shortcut().toString()) for a in menus["Imaging"].actions()]
+    assert imaging == [
+        ("Acquire", "F2"),
+        ("Live Acquisition", "F6"),
+        ("Auto Contrast", "F9"),
+        ("Auto Focus", "F11"),
+    ]
+
+
+def test_full_screen_actions_drive_the_quad_view(window):
+    from fibsem.structures import BeamType
+
+    ui = window.salami_ui
+    ui._fullscreen_view_actions[1].trigger()  # FIB
+    assert ui.view_controller.fullscreen is BeamType.ION
+    ui._sync_view_menu()
+    assert ui.action_toggle_fullscreen.isChecked()
+    ui.action_exit_fullscreen.trigger()
+    assert ui.view_controller.fullscreen is None
+
+
+def test_imaging_hotkeys_do_nothing_without_a_microscope(window):
+    for action in window.salami_ui._imaging_actions:
+        action.trigger()  # must not raise
+
+
 def test_corner_label_follows_the_open_experiment(window, tmp_path):
     window.salami_ui._adopt_experiment(
         SalamiExperiment.create(parent_dir=str(tmp_path), name="sample-42")
