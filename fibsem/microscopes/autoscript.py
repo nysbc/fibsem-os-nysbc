@@ -134,7 +134,6 @@ try:
     )
     from autoscript_sdb_microscope_client.enumerations import (
         CoordinateSystem,
-        ImagingState,
         ManipulatorCoordinateSystem,
         ManipulatorSavedPosition,
         ManipulatorState,
@@ -146,7 +145,6 @@ try:
         AdornedImage,
         BitmapPatternDefinition,
         CompustagePosition,
-        GetImageSettings,
         GrabFrameSettings,
         Limits,
         Limits2d,
@@ -168,6 +166,24 @@ except Exception as e:
     logging.error(
         "Failed to load AutoScript (ThermoFisher) due to unexpected error",
         exc_info=True,
+    )
+
+try:
+    # for some reason, some versions of autoscript doesnt support these two methods. causes the connection to break,
+    # since they are only used for fast acquisition, they are gated here so only that function is disabled
+    # TODO: figure out what's going on here. This also happens on TFS Aquilos
+    from autoscript_sdb_microscope_client.enumerations import (
+        ImagingState,
+    )
+    from autoscript_sdb_microscope_client.structures import (
+        GetImageSettings,
+    )
+
+    AS_FAST_AQ_HELPERS = True
+except ImportError:
+    AS_FAST_AQ_HELPERS = False
+    logging.warning(
+        "Failed to load Autoscript Imaging State Enum and/or GetImageSettings structure, fast imaging will not work, please see Autoscript Package and version"
     )
 
 
@@ -1364,6 +1380,7 @@ class ThermoMicroscope(FibsemMicroscope):
     def _acquisition_worker(self, beam_type: BeamType):
         """Worker thread for image acquisition."""
         # TODO: add lock
+
         self.set_channel(channel=beam_type)
 
         try:
@@ -1373,7 +1390,7 @@ class ThermoMicroscope(FibsemMicroscope):
 
                 # fast continuous acquisition
                 USE_FAST_ACQUISITION = True
-                if USE_FAST_ACQUISITION:
+                if USE_FAST_ACQUISITION and AS_FAST_AQ_HELPERS:
                     self._fast_acquisition_worker(beam_type=beam_type)
                     if self._stop_acquisition_event.is_set():
                         break
@@ -1391,6 +1408,7 @@ class ThermoMicroscope(FibsemMicroscope):
             logging.error(f"Error in acquisition worker: {e}")
 
     def _fast_acquisition_worker(self, beam_type: BeamType):
+
         try:
             with self._threading_lock:
                 self.set_channel(channel=beam_type)  # re-force active channel...?
@@ -1401,11 +1419,15 @@ class ThermoMicroscope(FibsemMicroscope):
                     self.connection.imaging.stop_acquisition()
                     break
                 with self._threading_lock:
-                    self.set_channel(channel=beam_type)  # re-force active channel...?
+                    self.set_channel(
+                        channel=beam_type
+                    )  # re-force active channel...?
                     adorned_image = self.connection.imaging.get_image(
                         GetImageSettings(wait_for_frame=True)
                     )
-                    image = self._construct_image(adorned_image, beam_type=beam_type)
+                    image = self._construct_image(
+                        adorned_image, beam_type=beam_type
+                    )
 
                     logging.info(f"Acquired Image: {image.data.shape}")
                     # emit the acquired image
