@@ -1,6 +1,7 @@
 import logging
 import os
 import threading
+from copy import deepcopy
 from typing import Optional
 
 from PyQt5.QtCore import Qt, pyqtSignal
@@ -59,6 +60,7 @@ from fibsem.applications.salami.ui.experiment_dialogs import (
 from fibsem.applications.salami.ui.preferences_dialog import SalamiPreferencesDialog
 from fibsem.applications.salami.ui.protocol_page import RectangleSpec, preview_caption
 from fibsem.applications.salami.ui.qtdesigner_files import SalamiUI as SalamiMainUI
+from fibsem.applications.salami.ui.setup_editor import SetupConfigEditor
 from fibsem.applications.salami.ui.task_editor import TaskConfigEditorWidget
 from fibsem.applications.salami.ui.workflow_page import SalamiWorkflowPage
 from fibsem.applications.salami.workflow_update_schema import (
@@ -67,7 +69,7 @@ from fibsem.applications.salami.workflow_update_schema import (
 )
 from fibsem.microscope import FibsemMicroscope
 from fibsem.milling.tasks import FibsemMillingTaskConfig
-from fibsem.structures import BeamType, MicroscopeSettings
+from fibsem.structures import BeamType, FibsemRectangle, MicroscopeSettings
 from fibsem.ui import (
     DETECTION_AVAILABLE,
     FibsemImageSettingsWidget,
@@ -111,6 +113,12 @@ MILLING_REGION_COLOUR = "yellow"
 NO_PREVIEW_FOR_REGION = "Sync from the microscope to place the volume on an image."
 
 
+# The Setup entry in the Protocol page's task dropdown. Its data cannot clash
+# with a task name, which is free text.
+SETUP_TASK_KEY = "__setup__"
+SETUP_TASK_LABEL = "Setup"
+
+
 class SalamiUI(SalamiMainUI.Ui_MainWindow, QMainWindow):
     # The one channel from the experiment worker thread to the UI. Carries a
     # SalamiWorkflowUpdate: progress reports, user prompts, images and milling
@@ -121,6 +129,8 @@ class SalamiUI(SalamiMainUI.Ui_MainWindow, QMainWindow):
     # that stopped it. Separate from workflow_update_signal, which has a
     # WAITING_FOR_UI_UPDATE handshake a sync has no use for.
     sync_finished_signal = pyqtSignal(object)
+    # (step key, FibsemImage or Exception) from a setup-step sync.
+    setup_sync_finished_signal = pyqtSignal(str, object)
     # A finished run: carries None, or the Exception that stopped it. The worker
     # cannot touch widgets, so re-enabling the controls happens on this slot.
     run_finished_signal = pyqtSignal(object)
@@ -136,6 +146,9 @@ class SalamiUI(SalamiMainUI.Ui_MainWindow, QMainWindow):
         super().__init__()
         self.setupUi(self)
         self.setStyleSheet(NAPARI_STYLE)
+        # The image widget validates a dragged alignment area by writing to
+        # `parent.label_instructions` and enabling `parent.pushButton_yes`.
+        self.label_instructions = self.label_Instructions
 
         # Viewer-less: display goes through the Qt quad-view controller, which
         # sits in the left pane; the generated central widget (Salami controls)
@@ -167,6 +180,10 @@ class SalamiUI(SalamiMainUI.Ui_MainWindow, QMainWindow):
             False  # signal for waiting for UI to update with new workflow info
         )
         self.USER_RESPONSE: bool = False
+        # An alignment area being edited on the FIB view for a prompt, and the
+        # value the operator's click captured (see update_alignment_area_ui).
+        self._editing_alignment_area: bool = False
+        self.EDITED_ALIGNMENT_AREA: Optional[FibsemRectangle] = None
         self._workflow_stop_event = threading.Event()
         self._setup_thread: Optional[threading.Thread] = None
         self._sync_thread: Optional[threading.Thread] = None
@@ -175,6 +192,7 @@ class SalamiUI(SalamiMainUI.Ui_MainWindow, QMainWindow):
         self.workflow_update_signal.connect(self._on_workflow_update)
         self.sync_finished_signal.connect(self._on_sync_finished)
         self.run_finished_signal.connect(self._on_run_finished)
+        self.setup_sync_finished_signal.connect(self._on_setup_sync_finished)
         self.setup_finished_signal.connect(self._setup_completed)
 
         self.system_widget = FibsemSystemSetupWidget(parent=self)
@@ -305,8 +323,78 @@ class SalamiUI(SalamiMainUI.Ui_MainWindow, QMainWindow):
 
         notification_service.show_toast(msg, "info")
         self._update_experiment_status()
+        # Setup writes the trench and fiducial as milled back to the protocol.
+        if self.salamiExperimentConfig is not None:
+            self.setup_editor.set_setup(self.salamiExperimentConfig.setup)
 
         self.update_ui()
+
+    @property
+    def _setup_running(self) -> bool:
+        return self._setup_thread is not None and self._setup_thread.is_alive()
+
+    # ------------------------------------------------------------------
+    # Setup steps on the Protocol page
+    # ------------------------------------------------------------------
+
+    def _on_setup_sync(self, key: str) -> None:
+        """Acquire a FIB image at the step's field of view, on a worker thread."""
+        if self.microscope is None or self.settings is None:
+            return
+        if self.salamiExperimentConfig is None:
+            return
+        if self._sync_thread is not None and self._sync_thread.is_alive():
+            logging.info("A sync is already in progress.")
+            return
+
+        step = self.setup_editor.get_setup().step(key)
+        image_settings = deepcopy(self.settings.image)
+        image_settings.beam_type = BeamType.ION
+        image_settings.hfw = step.milling.field_of_view
+        image_settings.reduced_area = None
+        image_settings.save = False
+
+        self.setup_editor.set_busy(True, "Acquiring a FIB image...")
+        microscope = self.microscope
+
+        def worker():
+            try:
+                image = microscope.acquire_image(image_settings)
+            except Exception as e:
+                logging.exception("Setup sync failed")
+                self.setup_sync_finished_signal.emit(key, e)  # type: ignore
+                return
+            self.setup_sync_finished_signal.emit(key, image)  # type: ignore
+
+        self._sync_thread = threading.Thread(target=worker, daemon=True)
+        self._sync_thread.start()
+
+    def _on_setup_sync_finished(self, key: str, payload) -> None:
+        self.setup_editor.set_busy(False)
+        if isinstance(payload, Exception):
+            self.setup_editor.sync_row.set_status(f"Sync failed: {payload}")
+            notification_service.show(f"Microscope sync failed: {payload}", "error")
+            return
+        self.setup_editor.sync_row.set_status("")
+        self.setup_editor.show_image(key, payload)
+        self._display_sync_image(payload, BeamType.ION)
+
+    def _on_setup_update(self) -> None:
+        """Write the edited setup steps to the protocol and save it."""
+        config = self.salamiExperimentConfig
+        if config is None:
+            return
+        if self._setup_running:
+            QMessageBox.information(
+                self,
+                "Setup Running",
+                "Setup is running; update the protocol once it has finished.",
+            )
+            return
+        config.setup = self.setup_editor.get_setup()
+        self._save_config()
+        self.setup_editor.mark_saved()
+        notification_service.show_toast("Setup steps saved to the protocol.", "info")
 
     # ------------------------------------------------------------------
     # File menu
@@ -1114,6 +1202,14 @@ class SalamiUI(SalamiMainUI.Ui_MainWindow, QMainWindow):
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setWidget(self.task_config_editor)
         layout.addWidget(scroll)
+        self._task_editor_scroll = scroll
+
+        # Shown instead of the task editor when Task is "Setup".
+        self.setup_editor = SetupConfigEditor(parent=self.groupBoxTaskParameters)
+        self.setup_editor.setVisible(False)
+        self.setup_editor.sync_from_requested.connect(self._on_setup_sync)
+        self.setup_editor.update_requested.connect(self._on_setup_update)
+        layout.addWidget(self.setup_editor)
 
     def _populate_task_combo(self):
         """Fill the task selector from the protocol, keeping the current choice."""
@@ -1121,22 +1217,40 @@ class SalamiUI(SalamiMainUI.Ui_MainWindow, QMainWindow):
         self.comboBoxTasks.blockSignals(True)
         self.comboBoxTasks.clear()
         if self.salamiExperimentConfig is not None:
+            self.comboBoxTasks.addItem(SETUP_TASK_LABEL, SETUP_TASK_KEY)
             for task in self.salamiExperimentConfig.tasks:
                 self.comboBoxTasks.addItem(
                     f"{task.name}  ({task.TASK_TYPE})", task.name
                 )
+            self.setup_editor.set_setup(self.salamiExperimentConfig.setup)
         index = self.comboBoxTasks.findData(previous)
-        self.comboBoxTasks.setCurrentIndex(max(index, 0))
+        if index == -1:
+            # Open on the first task rather than Setup: tasks are what a
+            # protocol is mostly edited for.
+            index = 1 if self.comboBoxTasks.count() > 1 else 0
+        self.comboBoxTasks.setCurrentIndex(index)
         self.comboBoxTasks.blockSignals(False)
         self._on_selected_task_changed()
+
+    @property
+    def _setup_selected(self) -> bool:
+        return self.comboBoxTasks.currentData() == SETUP_TASK_KEY
 
     def _on_selected_task_changed(self, *_args):
         """Load the selected task's config into the editor."""
         experiment = self.salamiExperiment
         task_name = self.comboBoxTasks.currentData()
+        is_setup = task_name == SETUP_TASK_KEY
+        self._task_editor_scroll.setVisible(not is_setup)
+        self.setup_editor.setVisible(is_setup)
+        if self.protocol_page is not None:
+            self.protocol_page.show_setup_preview(is_setup)
+        if is_setup:
+            task_name = None
         task = experiment.find_task(task_name) if experiment and task_name else None
         self.task_config_editor.set_task_config(task)
         self._refresh_protocol_rectangles(task)
+        self.update_ui()
 
     def _on_task_config_changed(self):
         """An edit has already landed on the config object; persist the protocol.
@@ -1636,7 +1750,7 @@ class SalamiUI(SalamiMainUI.Ui_MainWindow, QMainWindow):
             return
 
         task_name = self.comboBoxTasks.currentData()
-        if not task_name:
+        if not task_name or task_name == SETUP_TASK_KEY:
             QMessageBox.information(self, "No Task", "Select a task to remove.")
             return
 
@@ -1687,6 +1801,7 @@ class SalamiUI(SalamiMainUI.Ui_MainWindow, QMainWindow):
 
         # Lets the generated editors offer the values this column supports.
         self.task_config_editor.set_microscope(self.microscope)
+        self.setup_editor.set_microscope(self.microscope)
 
         self.update_microscope_ui()
         self.update_ui()
@@ -1697,6 +1812,7 @@ class SalamiUI(SalamiMainUI.Ui_MainWindow, QMainWindow):
         if self.salamiExperiment is not None:
             self.salamiExperiment.microscope = None
         self.task_config_editor.set_microscope(None)
+        self.setup_editor.set_microscope(None)
         self.update_microscope_ui()
         self.update_ui()
 
@@ -1819,7 +1935,13 @@ class SalamiUI(SalamiMainUI.Ui_MainWindow, QMainWindow):
         # need no microscope, so a protocol can still be assembled offline.
         self.pushButtonAddTask.setEnabled(is_experiment_loaded and not running)
         self.pushButtonRemoveTask.setEnabled(
-            is_experiment_loaded and not running and self.comboBoxTasks.count() > 0
+            is_experiment_loaded
+            and not running
+            and self.comboBoxTasks.currentData() not in (None, SETUP_TASK_KEY)
+        )
+        # Setup reads the protocol's setup section as it runs.
+        self.setup_editor.set_update_enabled(
+            is_experiment_loaded and not self._setup_running
         )
 
         if running:
@@ -1876,6 +1998,15 @@ class SalamiUI(SalamiMainUI.Ui_MainWindow, QMainWindow):
 
         # positve / negative response
         self.USER_RESPONSE = bool(self.sender() == self.pushButton_yes)
+        # Read the edited area here, on the main thread, before releasing the
+        # worker that is waiting for it; then take the box down.
+        if self._editing_alignment_area:
+            self._editing_alignment_area = False
+            if self.image_widget is not None:
+                self.EDITED_ALIGNMENT_AREA = deepcopy(
+                    self.image_widget.get_alignment_area()
+                )
+                self.image_widget.clear_alignment_area()
         self.WAITING_FOR_USER_INTERACTION = False
 
     def _on_workflow_update(self, update: SalamiWorkflowUpdate) -> None:
@@ -1915,6 +2046,14 @@ class SalamiUI(SalamiMainUI.Ui_MainWindow, QMainWindow):
                 self.milling_task_config_widget.set_config(FibsemMillingTaskConfig())
 
         self.set_instructions_msg(msg=update.msg, pos=update.pos, neg=update.neg)
+
+        if update.alignment_area is not None:
+            if self.image_widget is None:
+                logging.warning("No image widget; cannot show the alignment area.")
+            else:
+                self.tabWidget.setCurrentWidget(self.image_widget)
+                self.image_widget.toggle_alignment_area(update.alignment_area)
+                self._editing_alignment_area = True
 
         # Beep once on entering a prompt, as AutoLamella does when it starts
         # waiting for the user; re-armed when the prompt clears.

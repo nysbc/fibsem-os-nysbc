@@ -8,8 +8,16 @@ from typing import TYPE_CHECKING, List, Optional
 
 import yaml
 
+from fibsem import acquire
 from fibsem.acquire import acquire_channels
-from fibsem.applications.salami._default_settings import DEFAULT_TRENCH
+from fibsem.applications.salami._default_settings import (
+    FIDUCIAL_ALIGNMENT_EXPANSION,
+)
+from fibsem.applications.salami.setup_config import (
+    SETUP_STEP_LABELS,
+    SalamiSetupConfig,
+    SetupStepConfig,
+)
 from fibsem.applications.salami.structures import (
     RunContext,
     VolumeAdvanceConfig,
@@ -26,11 +34,18 @@ from fibsem.applications.salami.workflow_ui import (
     _check_for_abort,
     ask_user,
     set_images_ui,
+    update_alignment_area_ui,
 )
 from fibsem.applications.salami.workflow_update_schema import SalamiWorkflowUpdate
 from fibsem.microscope import FibsemMicroscope
+from fibsem.milling.patterning.utils import get_pattern_reduced_area
 from fibsem.milling.tasks import FibsemMillingTaskConfig
-from fibsem.structures import MicroscopeState
+from fibsem.structures import (
+    BeamType,
+    FibsemImage,
+    FibsemRectangle,
+    MicroscopeState,
+)
 
 if TYPE_CHECKING:
     from fibsem.applications.salami.ui.SalamiUI import SalamiUI
@@ -38,6 +53,9 @@ if TYPE_CHECKING:
 # An experiment is a directory containing exactly these two files.
 CONFIG_FILENAME = "experiment_config.yaml"
 STATUS_FILENAME = "Experiment_Status.yaml"
+SETUP_DIRNAME = "Setup"
+# AutoLamella's name for the same image (`ALIGNMENT_REFERENCE_IMAGE_FILENAME`).
+ALIGNMENT_REFERENCE_FILENAME = "ref_alignment_ib.tif"
 DEFAULT_STATUS_NAME = "Experiment_Status"
 
 ALIGNMENT_IMAGE_NAME = "alignment_ref_image.tif"
@@ -71,6 +89,8 @@ class SalamiExperimentConfig:
     n_steps: int = 50
     advance: VolumeAdvanceConfig = field(default_factory=VolumeAdvanceConfig)
     tasks: List[TaskConfig] = field(default_factory=list)
+    # What Setup Experiment mills: the trench and the fiducial.
+    setup: SalamiSetupConfig = field(default_factory=SalamiSetupConfig)
 
     def to_dict(self) -> dict:
         return {
@@ -79,6 +99,7 @@ class SalamiExperimentConfig:
             "path": self.path,
             "n_steps": self.n_steps,
             "advance": self.advance.to_dict(),
+            "setup": self.setup.to_dict(),
             "tasks": [t.to_dict() for t in self.tasks],
         }
 
@@ -91,6 +112,7 @@ class SalamiExperimentConfig:
             n_steps=data.get("n_steps", 50),
             advance=VolumeAdvanceConfig.from_dict(data.get("advance", {})),
             tasks=[task_from_dict(t) for t in data.get("tasks", [])],
+            setup=SalamiSetupConfig.from_dict(data.get("setup")),
         )
 
     @property
@@ -193,6 +215,11 @@ class SalamiExperimentStatus:
     # The eucentric / sample position captured during setup. Sample-specific,
     # which is why it lives here and not in the protocol.
     sample_state: Optional[MicroscopeState] = None
+    # Region around the fiducial that the alignment reference image covers,
+    # and the field of view it was taken at. Set by setup; the slice task
+    # aligns against `ALIGNMENT_REFERENCE_FILENAME` in the Setup directory.
+    alignment_area: Optional[FibsemRectangle] = None
+    alignment_field_of_view: Optional[float] = None
 
     def __post_init__(self):
         if self.name is None:
@@ -210,6 +237,10 @@ class SalamiExperimentStatus:
             "last_updated": self.last_updated,
             "name": self.name,
             "sample_state": self.sample_state.to_dict() if self.sample_state else None,
+            "alignment_area": self.alignment_area.to_dict()
+            if self.alignment_area
+            else None,
+            "alignment_field_of_view": self.alignment_field_of_view,
         }
 
     @classmethod
@@ -217,6 +248,7 @@ class SalamiExperimentStatus:
         # `state` was the pre-rename key for `sample_state`; accept both so
         # status files written by earlier versions still load.
         sample_state = data.get("sample_state", data.get("state"))
+        alignment_area = data.get("alignment_area")
         return cls(
             current_step=data.get("current_step", 0),
             next_task_index=data.get("next_task_index", 0),
@@ -230,6 +262,10 @@ class SalamiExperimentStatus:
             sample_state=MicroscopeState.from_dict(sample_state)
             if sample_state
             else None,
+            alignment_area=FibsemRectangle.from_dict(alignment_area)
+            if alignment_area
+            else None,
+            alignment_field_of_view=data.get("alignment_field_of_view"),
         )
 
     def save(self, path: str) -> str:
@@ -281,9 +317,6 @@ class SalamiExperiment:
         self.status = status if status is not None else SalamiExperimentStatus()
         self._start_time = 0.0
         self.setup_path: Optional[str] = None
-        # Trench config as adjusted by the operator during setup. Instance-only
-        # for now; TODO: promote to the protocol so it survives a reload.
-        self.trench_config: Optional[FibsemMillingTaskConfig] = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -782,11 +815,17 @@ class SalamiExperiment:
     def setup_experiment(self) -> None:
         """Prepare the sample for slicing.
 
-        Includes:
-        - Milling trenches
-        - Fiducial creation and alignment area ref image
+        1. Confirm the sample is eucentric and at the milling tilt.
+        2. Mill the trench.
+        3. Mill the fiducial (AutoLamella's Mill Fiducial task, interactively).
+        4. Confirm the alignment area around it and save the reference image
+           the slices will align against.
+
+        Steps 2 and 3 use the protocol's setup section, and either can be
+        skipped there. The alignment area is confirmed either way: it is drawn
+        from the fiducial as the protocol records it.
         """
-        self.setup_path = os.path.join(self.config.path, "Setup")
+        self.setup_path = os.path.join(self.config.path, SETUP_DIRNAME)
         os.makedirs(self.setup_path, exist_ok=True)
 
         self.status.run_state = "setup"
@@ -799,9 +838,10 @@ class SalamiExperiment:
         # dig trench and polish
         self._prep_area()
 
-        # create fiducial and alignment reference image
+        # mill the fiducial, then the alignment area and reference image
         self._create_fiducial()
-        self._confirm_fiducial()
+        if not self._confirm_fiducial():
+            raise InterruptedError("Experiment setup aborted by user.")
 
         self.status.setup_complete = True
         self.status.run_state = "paused"
@@ -821,11 +861,17 @@ class SalamiExperiment:
             return None
         return deepcopy(settings.image)
 
-    def _acquire_and_display(self, filename_prefix: Optional[str] = None):
+    def _acquire_and_display(
+        self,
+        filename_prefix: Optional[str] = None,
+        field_of_view: Optional[float] = None,
+    ):
         """Acquire both channels, push them to the UI, optionally save to Setup."""
         image_settings = self._image_settings()
         if image_settings is None:
             return None, None
+        if field_of_view is not None:
+            image_settings.hfw = field_of_view
 
         eb, ib = acquire_channels(self.microscope, image_settings=image_settings)
         set_images_ui(parent_ui=self.parent_ui, eb_image=eb, ib_image=ib)
@@ -875,24 +921,150 @@ class SalamiExperiment:
 
     def _prep_area(self) -> None:
         """Mill trenches and polish the area."""
-        milling_config = deepcopy(DEFAULT_TRENCH)
+        self._run_setup_step(
+            self.config.setup.trench,
+            "trench",
+            msg=(
+                "Click Run Milling to mill the trenches and polish the area. "
+                "After milling, click Continue to proceed to fiducial milling."
+            ),
+            post_image_prefix="Post_Trench_Milling",
+            image_first=False,
+        )
 
-        if self.parent_ui is None:
-            logging.warning("Headless mode: skipping interactive trench milling.")
-            self.trench_config = milling_config
+    def _create_fiducial(self) -> None:
+        """Mill the fiducial, as AutoLamella's Mill Fiducial task does.
+
+        Images are taken at the fiducial's field of view first, so the pattern
+        is placed over an image at the scale it will be milled at.
+        """
+        self._run_setup_step(
+            self.config.setup.fiducial,
+            "fiducial",
+            msg=(
+                "Position the fiducial clear of the block face, then click Run "
+                "Milling. After milling, click Continue to set the alignment area."
+            ),
+            post_image_prefix="Post_Fiducial_Milling",
+            image_first=True,
+        )
+
+    def _run_setup_step(
+        self,
+        step: SetupStepConfig,
+        key: str,
+        msg: str,
+        post_image_prefix: str,
+        image_first: bool,
+    ) -> None:
+        """Mill one setup step from the protocol, unless it is set to skip.
+
+        What the operator leaves in the milling widget is what was milled, so
+        it is written back to the protocol and saved.
+        """
+        label = SETUP_STEP_LABELS[key]
+        if step.skip:
+            logging.info(f"Setup: skipping {label!r} (set to skip in the protocol).")
             return
+
+        field_of_view = step.milling.field_of_view
+        if image_first:
+            self._acquire_and_display(field_of_view=field_of_view)
+        step.milling = self._mill_interactively(
+            deepcopy(step.milling), workflow_msg=label, msg=msg
+        )
+        self.config.save()
+        self._acquire_and_display(
+            filename_prefix=post_image_prefix,
+            field_of_view=field_of_view if image_first else None,
+        )
+
+    def _confirm_fiducial(self) -> bool:
+        """Confirm the alignment area and save the alignment reference image.
+
+        The area starts as the fiducial's bounding box, expanded as AutoLamella
+        does, and the operator can correct it on the FIB view. Returns False if
+        they chose Exit.
+        """
+        config = self.config.setup.fiducial.milling
+        field_of_view = config.field_of_view
+        area = fiducial_alignment_area(config)
+
+        edited = update_alignment_area_ui(
+            parent_ui=self.parent_ui,
+            alignment_area=area,
+            workflow_msg="Confirm Alignment Area",
+            msg=(
+                "Drag to adjust the alignment area around the fiducial. "
+                "Press Continue when done."
+            ),
+        )
+        if edited is None:
+            return False
+        if not edited.is_valid_reduced_area:
+            raise ValueError(
+                f"Invalid alignment area: {edited}. It must lie inside the FIB image."
+            )
+
+        self.status.alignment_area = edited
+        self.status.alignment_field_of_view = field_of_view
+        self.status.save(self.config.path)
+
+        self._acquire_alignment_reference_image(edited, field_of_view)
+        return True
+
+    @property
+    def alignment_reference_path(self) -> str:
+        """Where setup saves the FIB image the slices align against."""
+        return os.path.join(
+            self.config.path, SETUP_DIRNAME, ALIGNMENT_REFERENCE_FILENAME
+        )
+
+    def _acquire_alignment_reference_image(
+        self, area: FibsemRectangle, field_of_view: float
+    ) -> Optional[FibsemImage]:
+        """FIB image of `area` only, saved as the alignment reference.
+
+        The same settings AutoLamella uses for its `ref_alignment_ib` image.
+        """
+        image_settings = self._image_settings()
+        if image_settings is None:
+            return None
+        image_settings.beam_type = BeamType.ION
+        image_settings.reduced_area = area
+        image_settings.hfw = field_of_view
+        image_settings.resolution = (1536, 1024)
+        image_settings.dwell_time = 1e-6
+        image_settings.autocontrast = True
+        image_settings.save = False  # saved below, under a fixed name
+
+        image = acquire.acquire_image(self.microscope, image_settings)
+        os.makedirs(os.path.dirname(self.alignment_reference_path), exist_ok=True)
+        image.save(self.alignment_reference_path)
+        set_images_ui(parent_ui=self.parent_ui, ib_image=image)
+        logging.info(
+            f"Saved alignment reference image: {self.alignment_reference_path}"
+        )
+        return image
+
+    def _mill_interactively(
+        self, milling_config: FibsemMillingTaskConfig, workflow_msg: str, msg: str
+    ) -> FibsemMillingTaskConfig:
+        """Show `milling_config` as a milling stage; the operator runs it.
+
+        Run Milling mills and asks again, so a stage can be re-run; Continue
+        moves on. Returns the config as the operator left it in the widget.
+        """
+        if self.parent_ui is None:
+            logging.warning(f"Headless mode: skipping interactive {workflow_msg!r}.")
+            return milling_config
 
         self._set_milling_config_ui(milling_config)
 
         pos, neg = "Run Milling", "Continue"
-        msg = (
-            "Click Run Milling to mill the trenches and polish the area. "
-            "After milling, click Continue to proceed to fiducial creation."
-        )
-
         response = ask_user(
             parent_ui=self.parent_ui,
-            workflow_msg="Mill Trenches and Polish to Prep Area",
+            workflow_msg=workflow_msg,
             msg=msg,
             pos=pos,
             neg=neg,
@@ -921,26 +1093,17 @@ class SalamiExperiment:
 
             response = ask_user(
                 parent_ui=self.parent_ui,
-                workflow_msg="Mill Trenches and Polish to Prep Area",
+                workflow_msg=workflow_msg,
                 msg=msg,
                 pos=pos,
                 neg=neg,
             )
 
         # Keep whatever the operator adjusted in the widget, rather than
-        # discarding it and reverting to the default trench.
-        self.trench_config = deepcopy(
-            self.parent_ui.milling_task_config_widget.get_config()
-        )
+        # discarding it and reverting to the default.
+        milled = deepcopy(self.parent_ui.milling_task_config_widget.get_config())
         self.clear_milling_config_ui()
-
-        self._acquire_and_display(filename_prefix="Post_Trench_Milling")
-
-    def _create_fiducial(self) -> None:
-        pass
-
-    def _confirm_fiducial(self) -> None:
-        pass
+        return milled
 
     # ------------------------------------------------------------------
     # UI helpers
@@ -979,6 +1142,24 @@ class SalamiExperiment:
         )
         while self.parent_ui.WAITING_FOR_UI_UPDATE:
             time.sleep(0.5)
+
+
+def fiducial_alignment_area(config: FibsemMillingTaskConfig) -> FibsemRectangle:
+    """The fiducial's bounding box, expanded, as a normalised FIB-image region.
+
+    Computed against a blank image at the fiducial's field of view, which is
+    what AutoLamella's Mill Fiducial task does.
+    """
+    area = get_pattern_reduced_area(
+        pattern=config.stages[0].pattern,
+        image=FibsemImage.generate_blank_image(hfw=config.field_of_view),
+        expand_percent=FIDUCIAL_ALIGNMENT_EXPANSION,
+    )
+    if not area.is_valid_reduced_area:
+        raise ValueError(
+            f"Invalid alignment area: {area}. Check the fiducial's field of view."
+        )
+    return area
 
 
 def run_salami_experiment(

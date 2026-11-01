@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Literal, Optional
 
 if TYPE_CHECKING:
     from fibsem.milling.tasks import FibsemMillingTaskConfig
-    from fibsem.structures import FibsemImage
+    from fibsem.structures import FibsemImage, FibsemRectangle
 
 # Fields carrying live objects or one-shot UI intent. Excluded from to_dict()
 # so serialisation stays cheap and YAML-safe — asdict() would otherwise try to
@@ -33,6 +33,7 @@ TRANSIENT_FIELDS = frozenset(
         "fib_image",
         "milling_config",
         "clear_milling_config",
+        "alignment_area",
     }
 )
 
@@ -109,6 +110,10 @@ class SalamiWorkflowUpdate:
     fib_image: Optional["FibsemImage"] = None
     milling_config: Optional["FibsemMillingTaskConfig"] = None
     clear_milling_config: bool = False
+    # Show this region as an editable box on the FIB view, alongside the
+    # prompt. The operator's Continue click reads it back (see
+    # `SalamiUI.push_interaction_button`).
+    alignment_area: Optional["FibsemRectangle"] = None
 
     def __post_init__(self):
         if self.timestamp is None:

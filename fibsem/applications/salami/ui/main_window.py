@@ -123,6 +123,7 @@ class SalamiMainWindow(QMainWindow):
             task_selector=ui.comboBoxTasks,
             task_parameters=ui.groupBoxTaskParameters,
             parent=self,
+            setup_preview=ui.setup_editor.preview_widget,
         )
 
     def _create_menu_bar(self) -> None:

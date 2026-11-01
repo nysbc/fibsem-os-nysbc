@@ -11,7 +11,7 @@ import time
 from typing import TYPE_CHECKING, Any, Optional
 
 from fibsem.applications.salami.workflow_update_schema import SalamiWorkflowUpdate
-from fibsem.structures import FibsemImage
+from fibsem.structures import FibsemImage, FibsemRectangle
 
 if TYPE_CHECKING:
     from fibsem.applications.salami.ui.SalamiUI import SalamiUI
@@ -89,6 +89,50 @@ def ask_user_continue_workflow(
         pos="Continue",
         neg="Exit",
     )
+
+
+def update_alignment_area_ui(
+    parent_ui: Optional[Any],
+    alignment_area: FibsemRectangle,
+    workflow_msg: str,
+    msg: str = "Drag to edit the alignment area. Press Continue when done.",
+) -> Optional[FibsemRectangle]:
+    """Let the operator adjust `alignment_area` on the FIB view.
+
+    Returns the area as left on screen, or None if they chose Exit. The Continue
+    click captures it on the main thread, so it is never read across threads.
+    Headless, the area comes back unchanged.
+    """
+    if parent_ui is None:
+        return alignment_area
+
+    parent_ui.EDITED_ALIGNMENT_AREA = None
+    parent_ui.WAITING_FOR_USER_INTERACTION = True
+    parent_ui.workflow_update_signal.emit(
+        SalamiWorkflowUpdate(
+            task="user_input",
+            msg=msg,
+            workflow_msg=workflow_msg,
+            pos="Continue",
+            neg="Exit",
+            alignment_area=alignment_area,
+            status="paused",
+        )
+    )
+
+    logging.info("WAITING_FOR_USER_INTERACTION (alignment area)...")
+    while parent_ui.WAITING_FOR_USER_INTERACTION:
+        _check_for_abort(parent_ui=parent_ui)
+        time.sleep(0.5)
+
+    parent_ui.workflow_update_signal.emit(
+        SalamiWorkflowUpdate(task="user_input", msg="")
+    )
+
+    if not parent_ui.USER_RESPONSE:
+        return None
+    edited = parent_ui.EDITED_ALIGNMENT_AREA
+    return edited if edited is not None else alignment_area
 
 
 def set_images_ui(

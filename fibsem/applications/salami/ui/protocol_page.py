@@ -27,6 +27,7 @@ from PyQt5.QtWidgets import (
     QLabel,
     QScrollArea,
     QSplitter,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -249,6 +250,7 @@ class SalamiProtocolPage(QWidget):
         task_selector: QWidget,
         task_parameters: QWidget,
         parent: Optional[QWidget] = None,
+        setup_preview: Optional[QWidget] = None,
     ):
         super().__init__(parent)
 
@@ -274,15 +276,29 @@ class SalamiProtocolPage(QWidget):
         col2_layout.addWidget(task_parameters, stretch=1)
 
         # --- Column 3: what that looks like on the sample ---
+        # The task preview, or, while Setup is selected, the setup editor's
+        # canvas with the step's milling patterns on it.
         self.preview = SyncPreviewPanel(parent=self)
+        self.preview_stack = QStackedWidget()
+        self.preview_stack.addWidget(self.preview)
+        self.setup_preview = setup_preview
+        if setup_preview is not None:
+            self.preview_stack.addWidget(setup_preview)
 
         splitter = QSplitter(Qt.Horizontal)  # type: ignore
         splitter.addWidget(_in_scroll_area(col1))
         splitter.addWidget(_in_scroll_area(col2))
-        splitter.addWidget(self.preview)
+        splitter.addWidget(self.preview_stack)
         splitter.setSizes([300, 420, 700])
         splitter.setChildrenCollapsible(False)
         layout.addWidget(splitter)
+
+    def show_setup_preview(self, show: bool) -> None:
+        """Swap the task preview for the setup canvas, or back."""
+        if show and self.setup_preview is not None:
+            self.preview_stack.setCurrentWidget(self.setup_preview)
+        else:
+            self.preview_stack.setCurrentWidget(self.preview)
 
     # -- preview passthrough, so callers don't reach through .preview ----------
 

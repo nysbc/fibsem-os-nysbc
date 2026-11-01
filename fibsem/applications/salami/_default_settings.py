@@ -1,9 +1,9 @@
 from fibsem.applications.salami.structures import DEFAULT_SLICE_THICKNESS
 from fibsem.milling.base import FibsemMillingStage
 from fibsem.milling.patterning import RectanglePattern
-from fibsem.milling.patterning.patterns2 import TrenchPattern
+from fibsem.milling.patterning.patterns2 import FiducialPattern, TrenchPattern
 from fibsem.milling.tasks import FibsemMillingTaskConfig
-from fibsem.structures import FibsemMillingSettings
+from fibsem.structures import FibsemMillingSettings, Point
 
 # Width of the slab removed each slice: the lateral extent of the block face
 # being collected.
@@ -45,3 +45,23 @@ DEFAULT_TRENCH = FibsemMillingTaskConfig(
         )
     ],
 )
+
+# AutoLamella's fiducial (`DEFAULT_MILLING_CONFIG[FIDUCIAL_KEY]`): an X milled
+# beside the block, imaged as the alignment reference for every slice. Offset
+# to the side so it stays clear of the face being sliced; the operator moves it
+# in the milling widget before running it.
+DEFAULT_FIDUCIAL = FibsemMillingTaskConfig(
+    name="Fiducial Milling",
+    field_of_view=80e-6,
+    stages=[
+        FibsemMillingStage(
+            name="Fiducial",
+            milling=FibsemMillingSettings(milling_current=1.0e-9),
+            pattern=FiducialPattern(point=Point(25e-6, 0)),
+        )
+    ],
+)
+
+# How far the alignment area reaches beyond the fiducial's bounding box, as
+# AutoLamella's `MillFiducialTaskConfig.alignment_expansion`.
+FIDUCIAL_ALIGNMENT_EXPANSION = 100  # percent

@@ -236,7 +236,7 @@ def test_moved_widgets_still_drive_their_handlers(window, tmp_path):
     ui = window.salami_ui
     ui._adopt_experiment(SalamiExperiment.create(parent_dir=str(tmp_path), name="e"))
 
-    assert ui.comboBoxTasks.count() == 2
+    assert ui.comboBoxTasks.count() == 3  # Setup, then the two tasks
     ui.comboBoxTasks.setCurrentIndex(ui.comboBoxTasks.findData("Acquisition_Task"))
     assert ui.task_config_editor.task_config.name == "Acquisition_Task"
 
