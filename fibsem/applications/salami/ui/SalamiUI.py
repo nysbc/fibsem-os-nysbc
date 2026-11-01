@@ -14,6 +14,7 @@ from PyQt5.QtWidgets import (
     QFileDialog,
     QFrame,
     QGridLayout,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -59,6 +60,7 @@ from fibsem.applications.salami.ui.preferences_dialog import SalamiPreferencesDi
 from fibsem.applications.salami.ui.protocol_page import RectangleSpec, preview_caption
 from fibsem.applications.salami.ui.qtdesigner_files import SalamiUI as SalamiMainUI
 from fibsem.applications.salami.ui.task_editor import TaskConfigEditorWidget
+from fibsem.applications.salami.ui.workflow_page import SalamiWorkflowPage
 from fibsem.applications.salami.workflow_update_schema import (
     SalamiWorkflowUpdate,
     format_duration,
@@ -122,6 +124,10 @@ class SalamiUI(SalamiMainUI.Ui_MainWindow, QMainWindow):
     # A finished run: carries None, or the Exception that stopped it. The worker
     # cannot touch widgets, so re-enabling the controls happens on this slot.
     run_finished_signal = pyqtSignal(object)
+    # Setup finished (True if complete); emitted from the setup worker thread.
+    setup_finished_signal = pyqtSignal(bool)
+    # Setup has started; the shell shows the Microscope page for its prompts.
+    setup_started = pyqtSignal()
     # An experiment was created, opened or closed. The shell window listens so
     # it can enable the Protocol page and retitle itself.
     experiment_changed = pyqtSignal()
@@ -169,6 +175,7 @@ class SalamiUI(SalamiMainUI.Ui_MainWindow, QMainWindow):
         self.workflow_update_signal.connect(self._on_workflow_update)
         self.sync_finished_signal.connect(self._on_sync_finished)
         self.run_finished_signal.connect(self._on_run_finished)
+        self.setup_finished_signal.connect(self._setup_completed)
 
         self.system_widget = FibsemSystemSetupWidget(parent=self)
         self.image_widget: Optional[FibsemImageSettingsWidget] = None
@@ -186,7 +193,7 @@ class SalamiUI(SalamiMainUI.Ui_MainWindow, QMainWindow):
         # dynamic widgets for the Experiment Information groupbox, keyed by field name
         self._exp_info_widgets: dict = {}
         self._setup_experiment_info_layout()
-        self._setup_experiment_status_layout()
+        self._setup_workflow_page()
         self._setup_task_config_layout()
 
         self.tabWidget.insertTab(0, self.system_widget, "Connection")
@@ -222,17 +229,6 @@ class SalamiUI(SalamiMainUI.Ui_MainWindow, QMainWindow):
         # Task Config tab: pick a task, edit the parameters generated from its config.
         self.comboBoxTasks.currentIndexChanged.connect(self._on_selected_task_changed)
 
-        # Run/Stop button styling.
-        self.pushButtonRunExperiment.setStyleSheet(
-            stylesheets.RUN_WORKFLOW_BUTTON_STYLESHEET
-        )
-        self.pushButtonStopExperiment.setStyleSheet(
-            stylesheets.STOP_WORKFLOW_BUTTON_STYLESHEET
-        )
-        self.pushButtonStopExperiment.setVisible(
-            False
-        )  # only show Stop when an experiment is running
-
         # workflow info
         self.set_current_workflow_message(msg=None, show=False)
         self.label_Instructions.setWordWrap(True)
@@ -252,12 +248,26 @@ class SalamiUI(SalamiMainUI.Ui_MainWindow, QMainWindow):
                 self, "Setup Running", "Setup is already in progress."
             )
             return
+        if self.salamiExperiment.status.setup_complete:
+            # Redoing setup mills a new trench and fiducial, so ask first.
+            reply = QMessageBox.question(
+                self,
+                "Run Setup Again",
+                "Setup is already complete. Run it again?\n\n"
+                "This mills the trench and fiducial again and replaces the "
+                "alignment reference image.",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
 
         self._workflow_stop_event.clear()
         self._setup_thread = threading.Thread(
             target=self._run_setup_experiment, daemon=True
         )
         self._setup_thread.start()
+        self.setup_started.emit()  # type: ignore
 
     def _run_setup_experiment(self) -> None:
 
@@ -282,7 +292,9 @@ class SalamiUI(SalamiMainUI.Ui_MainWindow, QMainWindow):
                 self.salamiExperiment is not None
                 and self.salamiExperiment.status.setup_complete
             )
-            self._setup_completed(success=success)
+            # Through a signal: this is the worker thread, and the handler
+            # touches widgets.
+            self.setup_finished_signal.emit(success)  # type: ignore
 
     def _setup_completed(self, success: bool = True) -> None:
 
@@ -292,7 +304,7 @@ class SalamiUI(SalamiMainUI.Ui_MainWindow, QMainWindow):
             msg = "Experiment setup incomplete. Please review the steps and try again."
 
         notification_service.show_toast(msg, "info")
-        # self._update_experiment_status()
+        self._update_experiment_status()
 
         self.update_ui()
 
@@ -918,6 +930,18 @@ class SalamiUI(SalamiMainUI.Ui_MainWindow, QMainWindow):
         self._exp_info_layout.setContentsMargins(0, 0, 0, 0)
         outer_layout.addWidget(self._exp_info_inner)
 
+        # Tasks are protocol, so the list is edited here. Remove acts on the
+        # task selected beside the task parameters.
+        task_row = QHBoxLayout()
+        self.pushButtonAddTask = QPushButton("Add Task", self.groupBoxExpInfo)
+        self.pushButtonAddTask.clicked.connect(self._on_add_task_clicked)
+        self.pushButtonRemoveTask = QPushButton("Remove Task", self.groupBoxExpInfo)
+        self.pushButtonRemoveTask.setToolTip("Remove the task selected under Task")
+        self.pushButtonRemoveTask.clicked.connect(self._on_remove_task_clicked)
+        task_row.addWidget(self.pushButtonAddTask)
+        task_row.addWidget(self.pushButtonRemoveTask)
+        outer_layout.addLayout(task_row)
+
         self.pushButtonUpdateExperiment = QPushButton(
             "Update Experiment", self.groupBoxExpInfo
         )
@@ -969,9 +993,14 @@ class SalamiUI(SalamiMainUI.Ui_MainWindow, QMainWindow):
             return widget.text()
         return None
 
-    @staticmethod
-    def _format_field_name(name: str) -> str:
-        return name.replace("_", " ").title()
+    _EXP_INFO_LABELS = {
+        "num_tasks": "Number of Tasks",
+        "n_steps": "Number of Steps",
+    }
+
+    @classmethod
+    def _format_field_name(cls, name: str) -> str:
+        return cls._EXP_INFO_LABELS.get(name) or name.replace("_", " ").title()
 
     def _populate_experiment_info(self):
         """Build widgets dynamically from `for_ui_display_MAIN()` so new fields show up automatically."""
@@ -986,6 +1015,8 @@ class SalamiUI(SalamiMainUI.Ui_MainWindow, QMainWindow):
             # Derived fields (e.g. num_tasks) can't be written back, so keep them read-only.
             if key in self._EXP_INFO_DERIVED:
                 widget.setEnabled(False)
+            if key == "n_steps":
+                widget.setMinimum(1)
             self._exp_info_layout.addWidget(label, row, 0)
             self._exp_info_layout.addWidget(widget, row, 1)
             self._exp_info_widgets[key] = widget
@@ -1010,6 +1041,7 @@ class SalamiUI(SalamiMainUI.Ui_MainWindow, QMainWindow):
         setters = {
             "name": set_top("name"),
             "description": set_top("description"),
+            "n_steps": lambda v: setattr(config, "n_steps", max(1, int(v))),
             "advance_milling_pattern": set_advance("advance_milling_pattern"),
             "advance_beam_shift": set_advance("advance_beam_shift"),
         }
@@ -1115,6 +1147,8 @@ class SalamiUI(SalamiMainUI.Ui_MainWindow, QMainWindow):
         """
         self._save_config()
         self._sync_rectangles_from_config()
+        if not self.is_running:
+            self._update_experiment_status()
 
     # ------------------------------------------------------------------
     # Editable regions on the protocol preview
@@ -1389,9 +1423,7 @@ class SalamiUI(SalamiMainUI.Ui_MainWindow, QMainWindow):
 
     def _set_running_ui(self, running: bool):
         """Swap Run for Stop and lock everything a run must not race with."""
-        self.pushButtonRunExperiment.setVisible(not running)
-        self.pushButtonStopExperiment.setVisible(running)
-        self.pushButtonStopExperiment.setEnabled(running)
+        self.workflow_page.set_running(running)
         self.pushButtonRunNextStep.setEnabled(not running)
         self.pushButton_RunSetup.setEnabled(not running)
         # Structural edits to the task list are the one thing the run loop
@@ -1533,45 +1565,30 @@ class SalamiUI(SalamiMainUI.Ui_MainWindow, QMainWindow):
             self.image_widget.eb_image = image
         self.image_widget._on_acquire(image)
 
-    def _setup_experiment_status_layout(self):
-        """Add editable n_steps + setup_complete fields to the Experiment Status groupbox."""
-        layout = self.groupBoxExpStatus.layout()
-        is_grid = isinstance(layout, QGridLayout)
-        next_row = layout.rowCount() if is_grid else 1
+    def _setup_workflow_page(self):
+        """Replace the Experiment tab with the Workflow page.
 
-        self.label_n_steps = QLabel("Number of Steps", self.groupBoxExpStatus)
-        self.spinBoxNSteps = QSpinBox(self.groupBoxExpStatus)
-        self.spinBoxNSteps.setRange(1, 1_000_000)
-        self.spinBoxNSteps.setKeyboardTracking(False)
-        self.spinBoxNSteps.setValue(1)
-        self.spinBoxNSteps.valueChanged.connect(self._on_n_steps_changed)
+        The page owns the run controls; they are aliased under their old names
+        so every handler and enable rule keeps working against them. Experiment
+        information moves to the Task Config tab, renamed Protocol. The shell
+        window lifts both out of this strip into pages of their own.
+        """
+        page = self.workflow_page = SalamiWorkflowPage(parent=self)
+        self.pushButton_RunSetup = page.btn_setup
+        self.pushButtonRunNextStep = page.btn_run_next_step
+        self.pushButtonRunExperiment = page.btn_run
+        self.pushButtonStopExperiment = page.btn_stop
 
-        self.label_setup_complete = QLabel("Setup Complete", self.groupBoxExpStatus)
-        self.checkBoxSetupComplete = QCheckBox(self.groupBoxExpStatus)
-        self.checkBoxSetupComplete.toggled.connect(self._on_setup_complete_toggled)
+        self.gridLayout_4.addWidget(self.groupBoxExpInfo, 2, 0, 1, 2)
+        self.tabWidget.setTabText(
+            self.tabWidget.indexOf(self.tabTaskConfig), "Protocol"
+        )
 
-        # Tasks are protocol, like n_steps above, so they are edited here rather
-        # than on the Protocol page — which selects a task to configure but does
-        # not own the list.
-        self.pushButtonAddTask = QPushButton("Add Task", self.groupBoxExpStatus)
-        self.pushButtonAddTask.clicked.connect(self._on_add_task_clicked)
-        self.pushButtonRemoveTask = QPushButton("Remove Task", self.groupBoxExpStatus)
-        self.pushButtonRemoveTask.clicked.connect(self._on_remove_task_clicked)
-
-        if is_grid:
-            layout.addWidget(self.label_n_steps, next_row, 0)
-            layout.addWidget(self.spinBoxNSteps, next_row, 1)
-            layout.addWidget(self.label_setup_complete, next_row + 1, 0)
-            layout.addWidget(self.checkBoxSetupComplete, next_row + 1, 1)
-            layout.addWidget(self.pushButtonAddTask, next_row + 2, 0)
-            layout.addWidget(self.pushButtonRemoveTask, next_row + 2, 1)
-        else:
-            layout.addWidget(self.label_n_steps)
-            layout.addWidget(self.spinBoxNSteps)
-            layout.addWidget(self.label_setup_complete)
-            layout.addWidget(self.checkBoxSetupComplete)
-            layout.addWidget(self.pushButtonAddTask)
-            layout.addWidget(self.pushButtonRemoveTask)
+        index = self.tabWidget.indexOf(self.tabExperiment)
+        self.tabWidget.removeTab(index)
+        self.tabExperiment.deleteLater()
+        self.tabExperiment = None
+        self.tabWidget.insertTab(index, page, "Workflow")
 
     # ------------------------------------------------------------------
     # Adding and removing tasks
@@ -1607,6 +1624,7 @@ class SalamiUI(SalamiMainUI.Ui_MainWindow, QMainWindow):
         index = self.comboBoxTasks.findData(task.name)
         if index != -1:
             self.comboBoxTasks.setCurrentIndex(index)
+        self._update_experiment_status()
         self.update_ui()
 
         logging.info(f"Added task {task.name!r} ({task.TASK_TYPE}) to the protocol.")
@@ -1642,62 +1660,20 @@ class SalamiUI(SalamiMainUI.Ui_MainWindow, QMainWindow):
         self._save_config()
 
         self._populate_task_combo()
+        self._update_experiment_status()
         self.update_ui()
 
         logging.info(f"Removed task {task_name!r} from the protocol.")
         notification_service.show_toast(f"Removed task {task_name!r}", "info")
 
-    def _on_n_steps_changed(self, value: int):
-        config = self.salamiExperimentConfig
-        if config is None:
-            return
-        config.n_steps = int(value)
-        self._save_config()
-        self._update_experiment_status()
-
-    def _on_setup_complete_toggled(self, checked: bool):
-        if self.salamiExperiment is None:
-            return
-        self.salamiExperiment.status.setup_complete = bool(checked)
-        # Persist so manual toggles survive a reload.
-        self.salamiExperiment.status.save(self.salamiExperiment.config.path)
-        # setup_complete gates the Run/Stop buttons.
-        self.update_ui()
-
     def _update_experiment_status(self):
-        """Drive the Experiment Status progress bar from current_step / n_steps."""
-        experiment = self.salamiExperiment
-        if experiment is None:
-            self.progressBarExpProgress.setValue(0)
-            self.label_2.setText("Progress")
-            self.checkBoxSetupComplete.blockSignals(True)
-            self.checkBoxSetupComplete.setChecked(False)
-            self.checkBoxSetupComplete.blockSignals(False)
-            return
-
-        status = experiment.for_ui_display_STATUS()
-        current = int(status.get("current_step", 0))
-        total = int(status.get("n_steps", 0))
-        pct = int((current / total) * 100) if total > 0 else 0
-        self.progressBarExpProgress.setValue(pct)
-        self.label_2.setText(f"Progress: {current} / {total}")
-
-        depth_um = status.get("volume_depth_um", 0.0)
-        step_nm = status.get("advance_step_size_nm", 0.0)
-        self.label_CurrentTaskInfo.setText(
-            f"{status.get('run_state', 'created')} | "
-            f"{step_nm:.1f} nm slices | {depth_um:.1f} um through the block"
+        """Show the experiment at rest on the Workflow page."""
+        self.workflow_page.show_experiment(
+            self.salamiExperiment, running=self.is_running
         )
-
-        # Sync the n_steps spinbox without retriggering its valueChanged handler.
-        self.spinBoxNSteps.blockSignals(True)
-        self.spinBoxNSteps.setValue(max(1, total))
-        self.spinBoxNSteps.blockSignals(False)
-
-        # Sync the setup_complete checkbox without retriggering its toggled handler.
-        self.checkBoxSetupComplete.blockSignals(True)
-        self.checkBoxSetupComplete.setChecked(bool(status.get("setup_complete", False)))
-        self.checkBoxSetupComplete.blockSignals(False)
+        widget = self._exp_info_widgets.get("num_tasks")
+        if widget is not None and self.salamiExperimentConfig is not None:
+            widget.setValue(len(self.salamiExperimentConfig.tasks))
 
     def connect_to_microscope(self):
 
@@ -1811,10 +1787,9 @@ class SalamiUI(SalamiMainUI.Ui_MainWindow, QMainWindow):
         # microscope. Task Config used to be gated on a connection because it
         # was going to use the live beam widgets; the generated editors read and
         # write the config only, so the gate is no longer needed.
-        self.tabWidget.setTabVisible(
-            self.tabWidget.indexOf(self.tabExperiment),
-            is_experiment_loaded,
-        )
+        workflow_index = self.tabWidget.indexOf(self.workflow_page)
+        if workflow_index != -1:
+            self.tabWidget.setTabVisible(workflow_index, is_experiment_loaded)
         # Task Config is only in this strip when running standalone; the shell
         # window moves it onto the Protocol page, and indexOf returns -1 then.
         task_config_index = self.tabWidget.indexOf(self.tabTaskConfig)
@@ -1837,9 +1812,7 @@ class SalamiUI(SalamiMainUI.Ui_MainWindow, QMainWindow):
         # anything while a run is in flight.
         self.pushButtonRunExperiment.setEnabled(can_run and not running)
         self.pushButtonRunNextStep.setEnabled(can_run and not running)
-        self.pushButtonStopExperiment.setEnabled(running)
-        self.pushButtonRunExperiment.setVisible(not running)
-        self.pushButtonStopExperiment.setVisible(running)
+        self.workflow_page.set_running(running)
 
         # Adding or removing a task changes the length of `config.tasks`, which
         # `status.next_task_index` indexes into while `_run_step` iterates. Both
@@ -1959,23 +1932,21 @@ class SalamiUI(SalamiMainUI.Ui_MainWindow, QMainWindow):
         self._update_progress_from(update)
 
     def _update_progress_from(self, update: SalamiWorkflowUpdate) -> None:
-        """Drive the status panel from a live run.
+        """Drive the Workflow page from a live setup or run.
 
-        Only progress-bearing updates qualify; a bare prompt or image push
-        leaves the panel showing whatever the run last reported.
+        Every update can raise or clear the prompt indicator; only progress-
+        bearing ones move the progress and the task marker.
         """
-        if update.total_steps <= 0:
-            return
-
-        self.progressBarExpProgress.setValue(int(update.overall_progress))
-        self.label_2.setText(f"Progress: {update.current_step} / {update.total_steps}")
-
-        parts = [update.task_name or update.task]
-        if update.total_tasks > 0:
-            parts.append(f"task {update.current_task_index + 1}/{update.total_tasks}")
-        if update.elapsed_time > 0:
-            parts.append(format_duration(update.elapsed_time))
-        self.label_CurrentTaskInfo.setText(" | ".join(p for p in parts if p))
+        page = self.workflow_page
+        page.show_update(update)
+        config = self.salamiExperimentConfig
+        if update.total_steps > 0 and config is not None:
+            page.show_tasks(
+                config.tasks,
+                step=update.current_step,
+                next_index=update.current_task_index,
+                running=True,
+            )
 
 
 def main():

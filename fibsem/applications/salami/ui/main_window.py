@@ -5,12 +5,14 @@ the menu; each tab is a whole page and does not know about the others:
 
     Microscope  the live control surface — quad view plus the widget strip
     Protocol    what the experiment will do — info, task parameters, preview
+    Workflow    what it is doing — status, current task, run controls
 
 `SalamiUI` is embedded as the Microscope page with its own menu bar hidden, the
 same way `AutoLamellaUI` is. The shell's File menu reuses that window's
 `QAction`s rather than duplicating them, so there is one definition of "New
 Experiment" and it stays wired to one handler.
 
+The Workflow page is `SalamiUI.workflow_page`, lifted out of the strip whole.
 The Protocol page is assembled from widgets `SalamiUI` already owns — the
 experiment info group box and the task editor are reparented out of the tab
 strip. Qt reparents on `addWidget`, and every handler keeps working because it
@@ -45,7 +47,7 @@ from fibsem.ui.stylesheets import (
 )
 from fibsem.ui.widgets.notifications import NotificationBell
 
-NO_EXPERIMENT_TOOLTIP = "Create or open an experiment to edit its protocol"
+NO_EXPERIMENT_TOOLTIP = "Create or open an experiment first"
 NO_EXPERIMENT_LABEL = "No Experiment"
 
 
@@ -82,6 +84,20 @@ class SalamiMainWindow(QMainWindow):
             fibsem_icon("mdi:file-document-edit", color=GRAY_ICON_COLOR),
             "Protocol",
         )
+
+        # --- Workflow page ---------------------------------------------------
+        ui = self.salami_ui
+        self.workflow_page = ui.workflow_page
+        ui.tabWidget.removeTab(ui.tabWidget.indexOf(self.workflow_page))
+        self.tab_widget.addTab(
+            self.workflow_page,
+            fibsem_icon("mdi:play-circle-outline", color=GRAY_ICON_COLOR),
+            "Workflow",
+        )
+        # Prompts are answered beside the images, on the Microscope page. Setup
+        # opens with one, so go there as it starts.
+        self.workflow_page.attention_requested.connect(self.show_microscope_page)
+        ui.setup_started.connect(self.show_microscope_page)
 
         # Let the control surface push sync previews here, and refresh the tab
         # state when an experiment is created, opened or closed.
@@ -188,11 +204,12 @@ class SalamiMainWindow(QMainWindow):
         so the workflow is discoverable, disabled with a reason until it applies.
         """
         has_experiment = self.salami_ui.salamiExperiment is not None
-        index = self.tab_widget.indexOf(self.protocol_page)
-        self.tab_widget.setTabEnabled(index, has_experiment)
-        self.tab_widget.setTabToolTip(
-            index, "" if has_experiment else NO_EXPERIMENT_TOOLTIP
-        )
+        for page in (self.protocol_page, self.workflow_page):
+            index = self.tab_widget.indexOf(page)
+            self.tab_widget.setTabEnabled(index, has_experiment)
+            self.tab_widget.setTabToolTip(
+                index, "" if has_experiment else NO_EXPERIMENT_TOOLTIP
+            )
 
         name = (
             self.salami_ui.salamiExperimentConfig.name
@@ -202,6 +219,9 @@ class SalamiMainWindow(QMainWindow):
         title = f"Salami v{fibsem.__version__}"
         self.setWindowTitle(f"{title} — {name}" if name else title)
         self.experiment_name_label.setText(name or NO_EXPERIMENT_LABEL)
+
+    def show_microscope_page(self) -> None:
+        self.tab_widget.setCurrentWidget(self.salami_ui)
 
     def show_protocol_preview(self, result) -> None:
         """Display the image a microscope sync acquired."""

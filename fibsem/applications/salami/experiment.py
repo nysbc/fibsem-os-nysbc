@@ -105,6 +105,7 @@ class SalamiExperimentConfig:
             "description": self.description,
             "path": self.path,
             "num_tasks": len(self.tasks),
+            "n_steps": self.n_steps,
             "advance_milling_pattern": self.advance.advance_milling_pattern,
             "advance_beam_shift": self.advance.advance_beam_shift,
         }

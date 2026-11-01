@@ -62,7 +62,7 @@ def _tab_titles(tab_widget):
 
 
 def test_shell_has_a_page_per_area(window):
-    assert _tab_titles(window.tab_widget) == ["Microscope", "Protocol"]
+    assert _tab_titles(window.tab_widget) == ["Microscope", "Protocol", "Workflow"]
 
 
 def test_protocol_page_is_disabled_until_there_is_an_experiment(window, tmp_path):
@@ -107,12 +107,121 @@ def test_task_config_tab_is_gone_from_the_microscope_strip(window):
     assert ui.tabWidget.indexOf(ui.tabTaskConfig) == -1
 
 
-def test_experiment_tab_keeps_only_status_and_controls(window):
+def test_experiment_tab_is_replaced_by_the_workflow_page(window):
     ui = window.salami_ui
-    assert ui.groupBoxExpStatus.parent() is ui.tabExperiment
-    assert ui.groupBox_ExperimentControls.parent() is ui.tabExperiment
-    # Experiment info moved to the Protocol page.
-    assert ui.groupBoxExpInfo.parent() is not ui.tabExperiment
+    assert ui.tabExperiment is None
+    assert "Experiment" not in _tab_titles(ui.tabWidget)
+    assert "Workflow" not in _tab_titles(ui.tabWidget)  # lifted into the shell
+    page = window.workflow_page
+    for button in (
+        ui.pushButton_RunSetup,
+        ui.pushButtonRunNextStep,
+        ui.pushButtonRunExperiment,
+        ui.pushButtonStopExperiment,
+    ):
+        assert page.isAncestorOf(button)
+
+
+def test_task_list_is_edited_in_the_protocol_experiment_section(window):
+    ui = window.salami_ui
+    for button in (ui.pushButtonAddTask, ui.pushButtonRemoveTask):
+        assert ui.groupBoxExpInfo.isAncestorOf(button)
+        assert window.protocol_page.isAncestorOf(button)
+
+
+def test_experiment_section_lists_task_and_step_counts(window, tmp_path):
+    ui = window.salami_ui
+    ui._adopt_experiment(SalamiExperiment.create(parent_dir=str(tmp_path), name="e"))
+    config = ui.salamiExperimentConfig
+    assert ui._exp_info_widgets["num_tasks"].value() == len(config.tasks)
+    assert not ui._exp_info_widgets["num_tasks"].isEnabled()
+
+    ui._exp_info_widgets["n_steps"].setValue(7)
+    ui._apply_experiment_info()
+    assert config.n_steps == 7
+    assert window.workflow_page.label_n_steps.text() == "7"
+
+
+def test_workflow_page_shows_the_experiment_read_only(window, tmp_path):
+    ui = window.salami_ui
+    page = window.workflow_page
+    index = window.tab_widget.indexOf(page)
+    assert not window.tab_widget.isTabEnabled(index)
+
+    ui._adopt_experiment(SalamiExperiment.create(parent_dir=str(tmp_path), name="e"))
+    assert window.tab_widget.isTabEnabled(index)
+    assert page.label_name.text() == "e"
+    assert page.label_setup.text() == "Not done"
+    assert page.task_list.count() == len(ui.salamiExperimentConfig.tasks)
+    # At rest every task is a circle.
+    texts = [page.task_list.item(i).text() for i in range(page.task_list.count())]
+    assert all(t.startswith("○") for t in texts)
+
+
+def test_running_marks_done_current_and_pending_tasks(window, tmp_path):
+    ui = window.salami_ui
+    ui._adopt_experiment(SalamiExperiment.create(parent_dir=str(tmp_path), name="e"))
+    tasks = ui.salamiExperimentConfig.tasks
+    page = window.workflow_page
+    page.show_tasks(tasks, step=0, next_index=1, running=True)
+    glyphs = [page.task_list.item(i).text()[0] for i in range(len(tasks))]
+    assert glyphs[:2] == ["✓", "▶"]
+    assert all(g == "○" for g in glyphs[2:])
+
+
+def test_setup_button_is_amber_until_setup_is_done(window, tmp_path):
+    from fibsem.applications.salami.ui import workflow_page as module
+
+    ui = window.salami_ui
+    experiment = SalamiExperiment.create(parent_dir=str(tmp_path), name="e")
+    ui._adopt_experiment(experiment)
+    button = window.workflow_page.btn_setup
+    assert button.styleSheet() == module.SETUP_PENDING_STYLESHEET
+
+    experiment.status.setup_complete = True
+    ui._update_experiment_status()
+    assert button.styleSheet() == module.SETUP_DONE_STYLESHEET
+
+
+def test_redoing_setup_asks_first(window, tmp_path, monkeypatch):
+    import importlib
+
+    module = importlib.import_module("fibsem.applications.salami.ui.SalamiUI")
+
+    ui = window.salami_ui
+    experiment = SalamiExperiment.create(parent_dir=str(tmp_path), name="e")
+    experiment.status.setup_complete = True
+    ui._adopt_experiment(experiment)
+
+    asked = []
+    monkeypatch.setattr(
+        module.QMessageBox,
+        "question",
+        lambda *a, **k: asked.append(a) or module.QMessageBox.No,
+    )
+    started = []
+    ui.setup_started.connect(lambda: started.append(1))
+    ui._on_setup_clicked()
+    assert asked and not started and ui._setup_thread is None
+
+
+def test_a_prompt_offers_the_way_to_the_microscope_page(window, tmp_path):
+    from fibsem.applications.salami.workflow_update_schema import (
+        SalamiWorkflowUpdate,
+    )
+
+    # The page is disabled until there is an experiment, as during any prompt.
+    window.salami_ui._adopt_experiment(
+        SalamiExperiment.create(parent_dir=str(tmp_path), name="e")
+    )
+    page = window.workflow_page
+    window.tab_widget.setCurrentWidget(page)
+    page.show_update(SalamiWorkflowUpdate(msg="Check the trench", pos="Continue"))
+    assert not page.btn_attention.isHidden()
+    page.btn_attention.click()
+    assert window.tab_widget.currentWidget() is window.salami_ui
+    page.show_update(SalamiWorkflowUpdate())
+    assert page.btn_attention.isHidden()
 
 
 def test_protocol_page_hosts_the_moved_widgets(window):
