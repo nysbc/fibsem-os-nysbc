@@ -119,6 +119,9 @@ class SalamiMainWindow(QMainWindow):
         file_menu = menu_bar.addMenu("File")
         self.salami_ui.add_file_menu_actions(file_menu)
 
+        edit_menu = menu_bar.addMenu("Edit")
+        self.salami_ui.add_edit_menu_actions(edit_menu)
+
     def _create_corner_widget(self) -> None:
         """Experiment name, New/Open buttons and the notification bell, on the tab bar.
 

@@ -41,6 +41,7 @@ from fibsem.applications.salami.experiment import (
     SalamiExperimentStatus,
     default_experiment_name,
 )
+from fibsem.applications.salami.preferences import load_salami_preferences
 from fibsem.applications.salami.recents import (
     SALAMI_LOG_DIR,
     SalamiExperimentSummary,
@@ -203,7 +204,10 @@ class SalamiCreateExperimentDialog(QtWidgets.QDialog):
 
         self.btn_default_protocol = QtWidgets.QPushButton("Default")
         self.btn_default_protocol.setStyleSheet(SECONDARY_BUTTON_STYLESHEET)
-        self.btn_default_protocol.setToolTip("Start from the default Salami protocol")
+        self.btn_default_protocol.setToolTip(
+            "Start from the default protocol: the one set in Edit > Preferences, "
+            "or the built-in Salami protocol"
+        )
         self.btn_select_protocol = QtWidgets.QPushButton("Select")
         self.btn_select_protocol.setStyleSheet(PRIMARY_BUTTON_STYLESHEET)
         self.btn_select_protocol.setToolTip(
@@ -281,6 +285,19 @@ class SalamiCreateExperimentDialog(QtWidgets.QDialog):
         self._validate()
 
     def _use_default_protocol(self) -> None:
+        """The protocol set in Preferences if it loads, else the built-in one."""
+        preferred = load_salami_preferences().default_protocol_path
+        if preferred:
+            try:
+                self.template = SalamiExperimentConfig.load(preferred)
+                self.template_path = preferred
+                self._show_template()
+                return
+            except Exception as e:
+                logging.warning(
+                    f"Preferred protocol {preferred} could not be loaded ({e}); "
+                    "using the default protocol instead."
+                )
         try:
             self.template = SalamiExperiment.default_template()
             self.template_path = "Default protocol"

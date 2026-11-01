@@ -291,6 +291,13 @@ def test_file_menu_mirrors_autolamella(window):
     ]
 
 
+def test_edit_menu_follows_file_and_holds_preferences(window):
+    titles = [a.text() for a in window.menuBar().actions()]
+    assert titles[:2] == ["File", "Edit"]
+    edit_menu = window.menuBar().actions()[1].menu()
+    assert edit_menu.actions() == [window.salami_ui.actionPreferences]
+
+
 def test_corner_label_follows_the_open_experiment(window, tmp_path):
     window.salami_ui._adopt_experiment(
         SalamiExperiment.create(parent_dir=str(tmp_path), name="sample-42")

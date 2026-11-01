@@ -6,6 +6,7 @@ from typing import Optional
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QAction,
+    QApplication,
     QCheckBox,
     QDialog,
     QDoubleSpinBox,
@@ -24,10 +25,15 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from fibsem import config as cfg
 from fibsem.applications.salami.experiment import (
     CONFIG_FILENAME,
     SalamiExperiment,
     SalamiExperimentConfig,
+)
+from fibsem.applications.salami.preferences import (
+    load_salami_preferences,
+    save_salami_preferences,
 )
 from fibsem.applications.salami.recents import (
     SALAMI_LOG_DIR,
@@ -47,6 +53,7 @@ from fibsem.applications.salami.ui.experiment_dialogs import (
     create_experiment_dialog,
     load_experiment_dialog,
 )
+from fibsem.applications.salami.ui.preferences_dialog import SalamiPreferencesDialog
 from fibsem.applications.salami.ui.protocol_page import RectangleSpec, preview_caption
 from fibsem.applications.salami.ui.qtdesigner_files import SalamiUI as SalamiMainUI
 from fibsem.applications.salami.ui.task_editor import TaskConfigEditorWidget
@@ -190,6 +197,7 @@ class SalamiUI(SalamiMainUI.Ui_MainWindow, QMainWindow):
         self.system_widget.disconnected_signal.connect(self.disconnect_from_microscope)
 
         self._setup_file_menu()
+        self._setup_edit_menu()
 
         # Setup runs setup_experiment in a worker thread so ask_user prompts
         # can be serviced by the main thread.
@@ -346,6 +354,49 @@ class SalamiUI(SalamiMainUI.Ui_MainWindow, QMainWindow):
         menu.addAction(self.actionExport_Config)
         menu.addSeparator()
         menu.addAction(self.actionExit)
+
+    # ------------------------------------------------------------------
+    # Edit menu
+    # ------------------------------------------------------------------
+
+    def _setup_edit_menu(self) -> None:
+        """Edit > Preferences, and the display preferences it governs."""
+        self.actionPreferences = QAction("Preferences...", self)
+        self.actionPreferences.setIcon(fibsem_icon("mdi:cog", color=GRAY_ICON_COLOR))
+        self.actionPreferences.setIconVisibleInMenu(True)
+        self.actionPreferences.triggered.connect(self.open_preferences)
+
+        # Standalone, this window's own Edit menu is the one shown.
+        self.menuEdit = self.menubar.addMenu("Edit")
+        self.add_edit_menu_actions(self.menuEdit)
+
+        self._prompt_beeped = False
+        self._apply_display_preferences(cfg.load_user_preferences())
+
+    def add_edit_menu_actions(self, menu) -> None:
+        """Populate `menu` with the Edit actions."""
+        menu.addAction(self.actionPreferences)
+
+    def _apply_display_preferences(self, prefs: cfg.UserPreferences) -> None:
+        self._sound_enabled = prefs.display.sound_enabled
+        # Stored only: consumed once Salami has a workflow border to draw.
+        self._border_enabled = prefs.display.border_enabled
+
+    def open_preferences(self) -> None:
+        """Edit the preferences Salami uses; save and apply them on OK.
+
+        Movement needs no applying here: the stage widget reads it from the
+        shared preferences on every move.
+        """
+        dialog = SalamiPreferencesDialog(
+            cfg.load_user_preferences(), load_salami_preferences(), parent=self
+        )
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        prefs, salami_prefs = dialog.get_preferences()
+        cfg.save_user_preferences(prefs)
+        save_salami_preferences(salami_prefs)
+        self._apply_display_preferences(prefs)
 
     def create_new_experiment(self):
         """Create a new experiment, from the default protocol or a saved one."""
@@ -1598,6 +1649,14 @@ class SalamiUI(SalamiMainUI.Ui_MainWindow, QMainWindow):
                 self.milling_task_config_widget.set_config(FibsemMillingTaskConfig())
 
         self.set_instructions_msg(msg=update.msg, pos=update.pos, neg=update.neg)
+
+        # Beep once on entering a prompt, as AutoLamella does when it starts
+        # waiting for the user; re-armed when the prompt clears.
+        if update.pos is None:
+            self._prompt_beeped = False
+        elif self._sound_enabled and not self._prompt_beeped:
+            QApplication.beep()
+            self._prompt_beeped = True
 
         self.set_current_workflow_message(
             msg=update.workflow_msg,

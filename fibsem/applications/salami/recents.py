@@ -19,6 +19,7 @@ from fibsem.applications.salami.experiment import (
     CONFIG_FILENAME,
     STATUS_FILENAME,
 )
+from fibsem.applications.salami.preferences import load_salami_preferences
 from fibsem.config import CONFIG_PATH, MAX_RECENT_EXPERIMENTS
 
 RECENTS_PATH = os.path.join(CONFIG_PATH, "salami-recent-experiments.yaml")
@@ -139,9 +140,13 @@ def get_recent_experiments(prune_missing: bool = True) -> List[SalamiExperimentS
 def default_parent_directory() -> str:
     """Where a new experiment goes unless the operator says otherwise.
 
-    Beside the most recent experiment, since a run of samples tends to share a
-    parent folder; otherwise the application's own log directory.
+    The directory set in Preferences, if it still exists. Otherwise beside the
+    most recent experiment, since a run of samples tends to share a parent
+    folder; otherwise the application's own log directory.
     """
+    preferred = load_salami_preferences().default_experiment_directory
+    if preferred and os.path.isdir(preferred):
+        return preferred
     for path in _load_paths():
         parent = os.path.dirname(os.path.normpath(path))
         if parent and os.path.isdir(parent):
