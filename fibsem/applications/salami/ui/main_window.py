@@ -116,13 +116,8 @@ class SalamiMainWindow(QMainWindow):
             logging.warning("No menu bar available on the Salami main window.")
             return
 
-        ui = self.salami_ui
         file_menu = menu_bar.addMenu("File")
-        file_menu.addAction(ui.actionCreate_New_Experiment)
-        file_menu.addAction(ui.actionLoad_Experiment)
-        file_menu.addSeparator()
-        file_menu.addAction(ui.actionLoad_Config)
-        file_menu.addAction(ui.actionExport_Config)
+        self.salami_ui.add_file_menu_actions(file_menu)
 
     def _create_corner_widget(self) -> None:
         """Experiment name, New/Open buttons and the notification bell, on the tab bar.

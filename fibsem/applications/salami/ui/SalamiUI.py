@@ -3,32 +3,15 @@ import os
 import threading
 from typing import Optional
 
-from fibsem.applications.salami.experiment import (
-    CONFIG_FILENAME,
-    SalamiExperiment,
-    SalamiExperimentConfig,
-    default_experiment_name,
-)
-from fibsem.applications.salami.workflow_update_schema import (
-    SalamiWorkflowUpdate,
-    format_duration,
-)
-
-# Default home for new Salami experiments: <repo>/fibsem/applications/salami/log/
-SALAMI_LOG_DIR = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), os.pardir, "log")
-)
-
-
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
+    QAction,
     QCheckBox,
     QDialog,
     QDoubleSpinBox,
     QFileDialog,
     QFrame,
     QGridLayout,
-    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -41,6 +24,16 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from fibsem.applications.salami.experiment import (
+    CONFIG_FILENAME,
+    SalamiExperiment,
+    SalamiExperimentConfig,
+)
+from fibsem.applications.salami.recents import (
+    SALAMI_LOG_DIR,
+    last_experiment_directory,
+    record_recent_experiment,
+)
 from fibsem.applications.salami.tasks import (
     MillingTaskConfig,
     apply_milling_region,
@@ -50,9 +43,17 @@ from fibsem.applications.salami.tasks import (
     sync_config_to_microscope,
 )
 from fibsem.applications.salami.ui.add_task_dialog import AddTaskDialog
+from fibsem.applications.salami.ui.experiment_dialogs import (
+    create_experiment_dialog,
+    load_experiment_dialog,
+)
 from fibsem.applications.salami.ui.protocol_page import RectangleSpec, preview_caption
 from fibsem.applications.salami.ui.qtdesigner_files import SalamiUI as SalamiMainUI
 from fibsem.applications.salami.ui.task_editor import TaskConfigEditorWidget
+from fibsem.applications.salami.workflow_update_schema import (
+    SalamiWorkflowUpdate,
+    format_duration,
+)
 from fibsem.microscope import FibsemMicroscope
 from fibsem.milling.tasks import FibsemMillingTaskConfig
 from fibsem.structures import BeamType, MicroscopeSettings
@@ -66,19 +67,20 @@ from fibsem.ui import (
     stylesheets,
 )
 from fibsem.ui import utils as fui
-from fibsem.ui.stylesheets import NAPARI_STYLE
+from fibsem.ui.icon import fibsem_icon
+from fibsem.ui.stylesheets import GRAY_ICON_COLOR, NAPARI_STYLE
 from fibsem.ui.widgets.canvas.quad_view import MicroscopeViewController
 from fibsem.ui.widgets.notifications import ToastManager
 
 # instructions
 INSTRUCTIONS = {
-    "NO_EXPERIMENT": "Please create or open an experiment (File -> New / Open Experiment)",
+    "NO_EXPERIMENT": "Please create or open an experiment (File -> New / Load Experiment)",
     "NOT_CONNECTED": "Please connect to the microscope (Connection -> Connect to Microscope).",
     "SETUP_EXPERIMENT": (
         "Click Setup Experiment to prepare the area and create a fiducial marker. "
         "For a protocol that needs no preparation, tick Setup Complete to enable Run."
     ),
-    "INTERRUPTED": "A task was interrupted. Resolve it before running (File -> Open Experiment).",
+    "INTERRUPTED": "A task was interrupted. Resolve it before running (File -> Load Experiment).",
 }
 
 # Auto-function regions drawn over the protocol preview: (config attribute,
@@ -187,11 +189,7 @@ class SalamiUI(SalamiMainUI.Ui_MainWindow, QMainWindow):
         self.system_widget.connected_signal.connect(self.connect_to_microscope)
         self.system_widget.disconnected_signal.connect(self.disconnect_from_microscope)
 
-        # Three distinct operations, deliberately separated: "New From Protocol"
-        # re-homes a copy rather than adopting the source config in place, which
-        # is what used to overwrite the original experiment's status file.
-        self.actionLoad_Config.triggered.connect(self.new_experiment_from_template)
-        self.actionExport_Config.triggered.connect(self.export_config)
+        self._setup_file_menu()
 
         # Setup runs setup_experiment in a worker thread so ask_user prompts
         # can be serviced by the main thread.
@@ -207,18 +205,8 @@ class SalamiUI(SalamiMainUI.Ui_MainWindow, QMainWindow):
         self.pushButton_yes.clicked.connect(self.push_interaction_button)
         self.pushButton_no.clicked.connect(self.push_interaction_button)
 
-        self.actionCreate_New_Experiment.triggered.connect(self.create_new_experiment)
-
-        self.actionLoad_Experiment.triggered.connect(self.open_experiment)
-
         # Task Config tab: pick a task, edit the parameters generated from its config.
         self.comboBoxTasks.currentIndexChanged.connect(self._on_selected_task_changed)
-
-        # Menu labels, so the three operations read distinctly.
-        self.actionCreate_New_Experiment.setText("New Experiment")
-        self.actionLoad_Experiment.setText("Open Experiment")
-        self.actionLoad_Config.setText("New Experiment From Protocol")
-        self.actionExport_Config.setText("Export Protocol")
 
         # Run/Stop button styling.
         self.pushButtonRunExperiment.setStyleSheet(
@@ -294,92 +282,86 @@ class SalamiUI(SalamiMainUI.Ui_MainWindow, QMainWindow):
 
         self.update_ui()
 
-    def _choose_new_experiment_location(self, title: str):
-        """Prompt for a parent directory and experiment name. Returns (dir, name) or None."""
-        os.makedirs(SALAMI_LOG_DIR, exist_ok=True)
-        parent_dir = QFileDialog.getExistingDirectory(self, title, SALAMI_LOG_DIR)
-        if not parent_dir:
-            return None
+    # ------------------------------------------------------------------
+    # File menu
+    # ------------------------------------------------------------------
 
-        name, ok = QInputDialog.getText(
-            self, "Experiment Name", "Name:", text=default_experiment_name()
+    def _setup_file_menu(self) -> None:
+        """Wire and label the File menu, in AutoLamella's order.
+
+        The actions are the ones generated from the .ui file, plus two made here;
+        the shell window adds these same objects to its own menu, so there is one
+        handler per operation whichever menu or button reaches it.
+        """
+        self.actionOpen_Experiment_Directory = QAction(
+            "Open Experiment Directory", self
         )
-        if not ok or not name.strip():
-            return None
-        return parent_dir, name.strip()
+        self.actionExit = QAction("Exit", self)
+
+        entries = (
+            (
+                self.actionCreate_New_Experiment,
+                "New Experiment",
+                "mdi:plus",
+                self.create_new_experiment,
+            ),
+            (
+                self.actionLoad_Experiment,
+                "Load Experiment",
+                "mdi:folder-open",
+                self.open_experiment,
+            ),
+            (
+                self.actionOpen_Experiment_Directory,
+                "Open Experiment Directory",
+                "mdi:folder",
+                self.open_experiment_directory,
+            ),
+            (self.actionLoad_Config, "Load Protocol", None, self.load_protocol),
+            (self.actionExport_Config, "Save Protocol", None, self.export_config),
+            # The top-level window, which is the shell when embedded in one.
+            (self.actionExit, "Exit", None, lambda: self.window().close()),
+        )
+        for action, text, icon, handler in entries:
+            action.setText(text)
+            if icon is not None:
+                # setIconVisibleInMenu: Qt hides menu icons on macOS otherwise.
+                action.setIcon(fibsem_icon(icon, color=GRAY_ICON_COLOR))
+                action.setIconVisibleInMenu(True)
+            action.triggered.connect(handler)
+
+        # Standalone, this window's own File menu is the one shown. Rebuilt so it
+        # matches the shell's rather than the order in the .ui file.
+        self.menuFile.clear()
+        self.menuFile.setTitle("File")
+        self.add_file_menu_actions(self.menuFile)
+
+    def add_file_menu_actions(self, menu) -> None:
+        """Populate `menu` with the File actions, grouped as AutoLamella's are."""
+        menu.addAction(self.actionCreate_New_Experiment)
+        menu.addAction(self.actionLoad_Experiment)
+        menu.addAction(self.actionOpen_Experiment_Directory)
+        menu.addSeparator()
+        menu.addAction(self.actionLoad_Config)
+        menu.addAction(self.actionExport_Config)
+        menu.addSeparator()
+        menu.addAction(self.actionExit)
 
     def create_new_experiment(self):
-        """Create a new experiment from the default protocol."""
-        choice = self._choose_new_experiment_location(
-            "Choose Parent Directory for New Experiment"
+        """Create a new experiment, from the default protocol or a saved one."""
+        dialog = create_experiment_dialog(
+            microscope=self.microscope, parent_ui=self, parent=self
         )
-        if choice is None:
+        if dialog is None:
             return
-        parent_dir, name = choice
-        self._create_experiment(parent_dir, name, template=None)
-
-    def new_experiment_from_template(self):
-        """Reuse an existing protocol on a new sample.
-
-        The template is copied and re-homed into a new directory; the file it
-        came from is never written to.
-        """
-        filename, _ = QFileDialog.getOpenFileName(
-            self,
-            "Choose Protocol to Reuse",
-            SALAMI_LOG_DIR,
-            "YAML Files (*.yaml *.yml);;All Files (*)",
+        experiment = dialog.get_experiment()
+        self._adopt_experiment(
+            experiment, source=dialog.source or f"new at {experiment.path}"
         )
-        if not filename:
-            return
-
-        try:
-            template = SalamiExperimentConfig.load(filename)
-        except Exception as e:
-            logging.exception("Failed to load protocol")
-            QMessageBox.critical(
-                self,
-                "Load Protocol Failed",
-                f"Could not load protocol:\n{filename}\n\n{e}",
-            )
-            return
-
-        choice = self._choose_new_experiment_location(
-            "Choose Parent Directory for the New Experiment"
-        )
-        if choice is None:
-            return
-        parent_dir, name = choice
-        self._create_experiment(
-            parent_dir, name, template=template, source=f"template {template.name!r}"
-        )
-
-    def _create_experiment(self, parent_dir, name, template, source: str = ""):
-        try:
-            experiment = SalamiExperiment.create(
-                parent_dir=parent_dir,
-                name=name,
-                template=template,
-                microscope=self.microscope,
-                parent_ui=self,
-            )
-        except FileExistsError as e:
-            QMessageBox.warning(self, "Experiment Exists", str(e))
-            return
-        except Exception as e:
-            logging.exception("Failed to create experiment")
-            QMessageBox.critical(
-                self, "Create Experiment Failed", f"Could not create experiment:\n{e}"
-            )
-            return
-
-        self._adopt_experiment(experiment, source=source or f"new at {experiment.path}")
 
     def open_experiment(self):
-        """Open an existing experiment directory and resume from its status."""
-        directory = QFileDialog.getExistingDirectory(
-            self, "Choose Experiment Directory", SALAMI_LOG_DIR
-        )
+        """Choose an existing experiment and resume from its status."""
+        directory = load_experiment_dialog(parent=self)
         if not directory:
             return
 
@@ -441,8 +423,88 @@ class SalamiUI(SalamiMainUI.Ui_MainWindow, QMainWindow):
         self._update_experiment_status()
         self.update_ui()
 
+    def open_experiment_directory(self):
+        """Show the experiment's folder in the system file explorer."""
+        config = self.salamiExperimentConfig
+        if config is None or not config.path:
+            notification_service.show_toast(
+                "Create or open an experiment first.", "warning"
+            )
+            return
+        if not os.path.isdir(config.path):
+            notification_service.show_toast(
+                f"Experiment directory not found: {config.path}", "error"
+            )
+            return
+        if not fui.open_path_in_file_explorer(config.path):
+            notification_service.show_toast(
+                "Failed to open experiment directory.", "error"
+            )
+
+    def load_protocol(self):
+        """Replace this experiment's tasks and slicing with a saved protocol.
+
+        The experiment keeps its name, directory and run state; see
+        `SalamiExperiment.replace_protocol` for when it refuses.
+        """
+        experiment = self.salamiExperiment
+        if experiment is None:
+            notification_service.show_toast(
+                "Create or open an experiment first.", "warning"
+            )
+            return
+        if self.is_running:
+            # Same reason Add/Remove Task are locked: the run indexes into the list.
+            QMessageBox.information(
+                self, "Experiment Running", "Stop the run before loading a protocol."
+            )
+            return
+
+        filename = fui.open_existing_file_dialog(
+            msg="Select a protocol to load (*.yaml)",
+            path=last_experiment_directory() or SALAMI_LOG_DIR,
+            parent=self,
+        )
+        if not filename:
+            return
+        try:
+            template = SalamiExperimentConfig.load(filename)
+        except Exception as e:
+            logging.exception("Failed to load protocol")
+            QMessageBox.critical(
+                self,
+                "Invalid Protocol",
+                f"The selected file is not a valid Salami protocol:\n\n{filename}\n\n{e}",
+            )
+            return
+
+        confirm = QMessageBox.question(
+            self,
+            "Load Protocol",
+            f"Replace the tasks and slice settings of {experiment.config.name!r} with "
+            f"those from {template.name!r}?\n\n"
+            "The experiment keeps its name, directory and progress "
+            f"(slice {experiment.status.current_step} of {experiment.config.n_steps}).",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+
+        try:
+            experiment.replace_protocol(template)
+        except RuntimeError as e:
+            QMessageBox.warning(self, "Cannot Load Protocol", str(e))
+            return
+        except Exception as e:
+            logging.exception("Failed to load protocol into the experiment")
+            QMessageBox.critical(self, "Load Protocol Failed", str(e))
+            return
+
+        self._adopt_experiment(experiment, source=f"protocol {template.name!r} loaded")
+
     def export_config(self):
-        """Write the current protocol out for reuse on another sample."""
+        """Save the current protocol for reuse on another sample."""
         if self.salamiExperimentConfig is None:
             QMessageBox.warning(
                 self, "No Experiment", "Create or open an experiment first."
@@ -451,7 +513,7 @@ class SalamiUI(SalamiMainUI.Ui_MainWindow, QMainWindow):
 
         filename, _ = QFileDialog.getSaveFileName(
             self,
-            "Export Protocol",
+            "Save Protocol",
             os.path.join(SALAMI_LOG_DIR, f"{self.salamiExperimentConfig.name}.yaml"),
             "YAML Files (*.yaml *.yml);;All Files (*)",
         )
@@ -467,7 +529,7 @@ class SalamiUI(SalamiMainUI.Ui_MainWindow, QMainWindow):
             )
             return
 
-        notification_service.show_toast(f"Protocol exported to {filename}", "info")
+        notification_service.show_toast(f"Protocol saved to {filename}", "info")
 
     def _show_toast(self, message: str, notification_type: str, temporary: bool):
         self.toast_manager.show_toast(message, notification_type, temporary=temporary)
@@ -477,6 +539,9 @@ class SalamiUI(SalamiMainUI.Ui_MainWindow, QMainWindow):
         self.salamiExperiment = experiment
         # Other UI methods read from salamiExperimentConfig directly; keep it in sync.
         self.salamiExperimentConfig = experiment.config
+        # Every way in — created, opened, re-protocoled — lands here, so this is
+        # the one place the Load dialog's recent list is kept up to date.
+        record_recent_experiment(experiment.config.path)
 
         msg = f"Salami experiment ready: {experiment.config.name}" + (
             f" ({source})" if source else ""

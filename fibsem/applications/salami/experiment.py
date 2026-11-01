@@ -416,6 +416,45 @@ class SalamiExperiment:
         self.status.in_flight_task = None
         self.status.save(self.config.path)
 
+    def replace_protocol(self, template: SalamiExperimentConfig) -> None:
+        """Swap in another protocol's tasks and slicing, keeping this experiment.
+
+        The name, description and directory stay this experiment's, and so does
+        the run state: a run part-way through carries on from the slice it reached,
+        under the new protocol.
+
+        Refused part-way through a slice. `next_task_index` points into the old
+        task list, and there is no safe mapping onto a new one — starting the
+        slice again would re-run a mill that already removed material.
+        """
+        if self.status.in_flight_task is not None:
+            raise RuntimeError(
+                f"Task {self.status.in_flight_task!r} was interrupted. Resolve it "
+                "before loading a protocol."
+            )
+        if self.status.next_task_index != 0:
+            raise RuntimeError(
+                f"Slice {self.status.current_step + 1} is part-way through. Finish it "
+                "with Run Next Step before loading a protocol."
+            )
+
+        config = template.as_template(name=self.config.name, path=self.config.path)
+        config.description = self.config.description
+        self.config = config
+        for task_cfg in config.tasks:
+            ensure_task_directories(task_cfg, config.path)
+
+        # A pending one-shot skip naming a task the new protocol lacks would make
+        # the next run raise on it.
+        names = {task.name for task in config.tasks}
+        self.status.skip_once = [n for n in self.status.skip_once if n in names]
+
+        config.save()
+        self.status.save(config.path)
+        logging.info(
+            f"Loaded protocol {template.name!r} into experiment {config.name!r}."
+        )
+
     # ------------------------------------------------------------------
     # Task control (safe to call mid-run)
     # ------------------------------------------------------------------

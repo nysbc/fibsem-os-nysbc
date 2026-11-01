@@ -246,27 +246,49 @@ def test_corner_buttons_are_usable_offline(window):
 def test_corner_buttons_trigger_the_file_menu_actions(window, monkeypatch):
     """One handler per operation, whichever control the operator used.
 
-    Patches the directory chooser rather than the handler: the actions were
-    connected to bound methods at setup, so replacing the method on the class
-    afterwards would not intercept them — and the real handler would then open a
-    modal dialog that never returns under the offscreen platform.
+    Patches the dialogs rather than the handler: the actions were connected to
+    bound methods at setup, so replacing the method on the class afterwards would
+    not intercept them — and the real handler would then open a modal dialog that
+    never returns under the offscreen platform.
     """
-    from PyQt5.QtWidgets import QFileDialog
+    import importlib
+
+    # The module, not the class `salami.ui` re-exports under the same name.
+    salami_ui_module = importlib.import_module("fibsem.applications.salami.ui.SalamiUI")
 
     opened = []
 
-    def cancel(*args, **kwargs):
-        opened.append(args[1] if len(args) > 1 else "")
-        return ""  # operator cancelled; the handler returns early
+    def cancel(name):
+        def dialog(*args, **kwargs):
+            opened.append(name)
+            return None  # operator cancelled; the handler returns early
 
-    monkeypatch.setattr(QFileDialog, "getExistingDirectory", staticmethod(cancel))
+        return dialog
+
+    monkeypatch.setattr(salami_ui_module, "create_experiment_dialog", cancel("create"))
+    monkeypatch.setattr(salami_ui_module, "load_experiment_dialog", cancel("load"))
 
     window.btn_create_experiment.click()
     window.btn_load_experiment.click()
 
-    # Both reached a handler, and each asked for a directory with its own prompt.
-    assert len(opened) == 2
-    assert opened[0] != opened[1]
+    # Each button reached its own dialog.
+    assert opened == ["create", "load"]
+
+
+def test_file_menu_mirrors_autolamella(window):
+    """New / Load / Open Directory, then Load / Save Protocol, then Exit."""
+    menu = window.menuBar().actions()[0].menu()
+    labels = [a.text() or "---" for a in menu.actions()]
+    assert labels == [
+        "New Experiment",
+        "Load Experiment",
+        "Open Experiment Directory",
+        "---",
+        "Load Protocol",
+        "Save Protocol",
+        "---",
+        "Exit",
+    ]
 
 
 def test_corner_label_follows_the_open_experiment(window, tmp_path):
