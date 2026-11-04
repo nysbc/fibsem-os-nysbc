@@ -665,6 +665,14 @@ class FibsemImageSettingsWidget(QtWidgets.QWidget):
         self, both: bool = False, beam_type: Optional[BeamType] = None
     ) -> None:
         """Start the image acquisition process"""
+        # Before anything is disabled, so Cancel leaves the widget as it was.
+        if both:
+            beam_types = [BeamType.ELECTRON, BeamType.ION]
+        else:
+            beam_types = [beam_type or self.dual_beam_widget.beam_type]
+        if not self._confirm_imaging_currents(beam_types):
+            return
+
         # disable interactions
         self.is_acquiring = True
         self._toggle_interactions(enable=False, imaging=True)
@@ -689,6 +697,73 @@ class FibsemImageSettingsWidget(QtWidgets.QWidget):
         worker = self.acquisition_worker(self.image_settings, both=both)
         worker.finished.connect(self.acquisition_finished)
         worker.start()
+
+    def _confirm_imaging_currents(self, beam_types: List[BeamType]) -> bool:
+        """Whether to go ahead and image with these beams.
+
+        Reads each beam's current from the instrument, not from the beam panel: the
+        panel is only refreshed now and then, and a current changed on the
+        instrument's own software would not show there. Above the limit set in
+        Preferences -> Imaging, asks every time; Cancel is the default.
+        """
+        from fibsem.config import load_user_preferences
+
+        limits = load_user_preferences().imaging
+        over = []
+        for beam_type in beam_types:
+            if limits.limit_for(beam_type.name) is None:
+                continue
+            try:
+                current: Optional[float] = float(
+                    self.microscope.get_beam_current(beam_type)
+                )
+            except Exception as e:
+                logging.warning(
+                    f"Could not read the {beam_type.name} beam current: {e}"
+                )
+                current = None
+            if limits.exceeds_limit(beam_type.name, current):
+                over.append((beam_type, current, limits.limit_for(beam_type.name)))
+
+        if not over:
+            return True
+
+        names = {BeamType.ELECTRON: "SEM", BeamType.ION: "FIB"}
+        lines = []
+        for beam_type, current, limit in over:
+            limit_str = utils.format_value(limit, unit="A")
+            if current is None:
+                lines.append(
+                    f"The {names[beam_type]} beam current could not be read "
+                    f"(limit {limit_str})."
+                )
+            else:
+                lines.append(
+                    f"The {names[beam_type]} imaging current is "
+                    f"{utils.format_value(current, unit='A')}, above the "
+                    f"{limit_str} limit."
+                )
+        logging.warning({"msg": "imaging_current_above_limit", "beams": lines})
+
+        box = QtWidgets.QMessageBox(self)
+        box.setIcon(QtWidgets.QMessageBox.Warning)
+        box.setWindowTitle("Imaging Current Too High")
+        box.setText("\n".join(lines))
+        box.setInformativeText(
+            "Imaging at a high current can damage the sample. Check the beam current "
+            "before acquiring. Acquire anyway?"
+        )
+        acquire_anyway = box.addButton(
+            "Acquire Anyway", QtWidgets.QMessageBox.AcceptRole
+        )
+        cancel = box.addButton(QtWidgets.QMessageBox.Cancel)
+        box.setDefaultButton(cancel)
+        box.exec_()
+        confirmed = box.clickedButton() is acquire_anyway
+        logging.info(
+            {"msg": "imaging_current_above_limit_answer", "acquired": confirmed}
+        )
+        return confirmed
 
     @thread_worker
     def acquisition_worker(self, image_settings: ImageSettings, both: bool = False):

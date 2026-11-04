@@ -112,3 +112,70 @@ def test_agent_section_round_trips(qapp):
     assert again.agent.watchdog_minutes == 7
     assert UserPreferences.from_dict({"features": {}}).agent.watchdog_minutes == 5
     dialog.deleteLater()
+
+
+# ---------------------------------------------------------------------------
+# Imaging current limits
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def demo_microscope():
+    from fibsem import utils
+
+    microscope, _ = utils.setup_session(manufacturer="Demo")
+    return microscope
+
+
+def test_imaging_limits_survive_the_dialog_without_a_microscope(qapp):
+    """With nothing connected the dialog cannot list currents, but a saved limit
+    must still be offered, or pressing OK would quietly clear it."""
+    prefs = UserPreferences()
+    prefs.imaging.max_imaging_current_electron = 1.6e-9
+    prefs.imaging.max_imaging_current_ion = None
+
+    restored = _round_trip(prefs)
+
+    assert restored.imaging.max_imaging_current_electron == pytest.approx(1.6e-9)
+    assert restored.imaging.max_imaging_current_ion is None
+
+
+def test_imaging_limits_are_chosen_from_the_instruments_currents(qapp, demo_microscope):
+    from fibsem.structures import BeamType
+
+    currents = sorted(
+        float(c)
+        for c in demo_microscope.get_available_values_cached("current", BeamType.ION)
+    )
+    dialog = PreferencesDialog(UserPreferences(), microscope=demo_microscope)
+    try:
+        combo = dialog._combo_max_current_ib
+        offered = [combo.itemData(row) for row in range(combo.count())]
+
+        assert offered == [None] + currents  # "No limit", then the currents
+
+        combo.setCurrentIndex(1)
+        restored = dialog.get_preferences()
+        assert restored.imaging.max_imaging_current_ion == currents[0]
+    finally:
+        dialog.deleteLater()
+
+
+def test_imaging_limits_survive_the_preferences_file(qapp):
+    prefs = UserPreferences()
+    prefs.imaging.max_imaging_current_ion = 50e-12
+
+    again = UserPreferences.from_dict(prefs.to_dict())
+
+    assert again.imaging.max_imaging_current_ion == pytest.approx(50e-12)
+
+
+def test_pressing_ok_keeps_the_users_hooks(qapp):
+    """The dialog does not edit hooks, so it must hand them back untouched: None
+    means "never configured", so dropping them reset a user's hooks to defaults."""
+    prefs = UserPreferences()
+    prefs.hooks = []  # the user turned every hook off
+
+    restored = _round_trip(prefs)
+
+    assert restored.hooks == []

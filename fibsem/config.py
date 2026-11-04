@@ -49,7 +49,7 @@ REFERENCE_HFW_HIGH = 150e-6
 REFERENCE_HFW_SUPER = 80e-6
 REFERENCE_HFW_ULTRA = 50e-6
 
-#LIFTOUT
+# LIFTOUT
 REFERENCE_HFW_INIT_NEEDLE_VIEW_IB = 600e-6
 
 REFERENCE_RES_SQUARE = [1024, 1024]
@@ -438,6 +438,49 @@ class MovementPreferences:
     acquire_fib_after_stage_movement: bool = True
 
 
+# The imaging current limits a fresh install starts with, in amps, per beam. None
+# is no limit. A current left high by accident images at milling dose, so the
+# acquire buttons ask before imaging above these.
+DEFAULT_MAX_IMAGING_CURRENT_ELECTRON: Optional[float] = None
+DEFAULT_MAX_IMAGING_CURRENT_ION: Optional[float] = None
+
+
+@dataclass
+class ImagingPreferences:
+    """The highest beam current the acquire buttons image at without asking, in
+    amps, per beam. None is no limit. Chosen in Preferences from the instrument's
+    own currents."""
+
+    max_imaging_current_electron: Optional[float] = DEFAULT_MAX_IMAGING_CURRENT_ELECTRON
+    max_imaging_current_ion: Optional[float] = DEFAULT_MAX_IMAGING_CURRENT_ION
+
+    def limit_for(self, beam_name: str) -> Optional[float]:
+        """The limit for a beam, by BeamType name ("ELECTRON" or "ION").
+
+        By name rather than BeamType, so this module does not import structures.
+        """
+        if beam_name == "ELECTRON":
+            return self.max_imaging_current_electron
+        if beam_name == "ION":
+            return self.max_imaging_current_ion
+        return None
+
+    def exceeds_limit(self, beam_name: str, current: Optional[float]) -> bool:
+        """Whether imaging at ``current`` needs the operator's say-so.
+
+        A current that could not be read counts as over the limit: the check exists
+        for the case nobody noticed, so not knowing must not wave it through. A
+        current equal to the limit is within it, with a tolerance for float noise
+        between the value stored here and the one the instrument reports.
+        """
+        limit = self.limit_for(beam_name)
+        if limit is None:
+            return False
+        if current is None:
+            return True
+        return current > limit * (1 + 1e-6)
+
+
 # Maximum number of recent experiments to remember for quick-select
 MAX_RECENT_EXPERIMENTS = 10
 
@@ -483,6 +526,7 @@ class UserPreferences:
     display: DisplayPreferences = field(default_factory=DisplayPreferences)
     features: FeatureFlags = field(default_factory=FeatureFlags)
     movement: MovementPreferences = field(default_factory=MovementPreferences)
+    imaging: ImagingPreferences = field(default_factory=ImagingPreferences)
     experiment: ExperimentPreferences = field(default_factory=ExperimentPreferences)
     reporting: ReportingPreferences = field(default_factory=ReportingPreferences)
     agent: AgentPreferences = field(default_factory=AgentPreferences)
@@ -510,6 +554,7 @@ class UserPreferences:
                 "display",
                 "features",
                 "movement",
+                "imaging",
                 "experiment",
                 "reporting",
                 "agent",
@@ -520,6 +565,7 @@ class UserPreferences:
                 display=_sub_from_dict(DisplayPreferences, d.get("display", {})),
                 features=_sub_from_dict(FeatureFlags, d.get("features", {})),
                 movement=_sub_from_dict(MovementPreferences, d.get("movement", {})),
+                imaging=_sub_from_dict(ImagingPreferences, d.get("imaging", {})),
                 experiment=_sub_from_dict(
                     ExperimentPreferences, d.get("experiment", {})
                 ),
@@ -760,6 +806,6 @@ AUTOLAMELLA_TASK_PROTOCOL_PATH: Path = os.path.join(
     AUTOLAMELLA_BASE_PATH, "protocol", "task-protocol.yaml"
 )
 AUTOLAMELLA_EXPERIMENT_NAME = "AutoLamella"
-AUTOLAMELLA_ML_PATH: Path = os.path.join(AUTOLAMELLA_BASE_PATH, 'ml')
+AUTOLAMELLA_ML_PATH: Path = os.path.join(AUTOLAMELLA_BASE_PATH, "ml")
 
 os.makedirs(AUTOLAMELLA_LOG_PATH, exist_ok=True)

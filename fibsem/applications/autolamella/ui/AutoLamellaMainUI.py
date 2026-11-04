@@ -939,7 +939,12 @@ class AutoLamellaSingleWindowUI(QMainWindow):
         """Open the preferences dialog."""
         from fibsem.ui.widgets.preferences_dialog import PreferencesDialog
 
-        dialog = PreferencesDialog(self._preferences, parent=self)
+        # the microscope, when connected, supplies the beam currents the imaging
+        # limits are chosen from
+        microscope = getattr(getattr(self, "autolamella_ui", None), "microscope", None)
+        dialog = PreferencesDialog(
+            self._preferences, parent=self, microscope=microscope
+        )
         if dialog.exec_() == QDialog.Accepted:
             self._preferences = dialog.get_preferences()
             fibsem_cfg.save_user_preferences(self._preferences)

@@ -1,5 +1,8 @@
 """Preferences dialog for AutoLamella user preferences."""
 
+import logging
+from typing import Optional
+
 from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -24,7 +27,9 @@ from fibsem.config import (
     UserPreferences,
     card_mode_label,
 )
+from fibsem.structures import BeamType
 from fibsem.ui.widgets.custom_widgets import QDirectoryLineEdit, QFileLineEdit
+from fibsem.utils import format_value
 
 # ---------------------------------------------------------------------------
 # Labels and tooltips — edit here to update both text and hover description
@@ -102,15 +107,32 @@ _TIP_ACQ_SEM = "Automatically acquire a new SEM image after each stage movement.
 _LBL_ACQ_FIB = "Acquire FIB After Stage Movement"
 _TIP_ACQ_FIB = "Automatically acquire a new FIB image after each stage movement."
 
+# Imaging
+_LBL_MAX_CURRENT_EB = "Max SEM Imaging Current"
+_LBL_MAX_CURRENT_IB = "Max FIB Imaging Current"
+_TIP_MAX_CURRENT = (
+    "Acquiring an image at a beam current above this asks for confirmation first, "
+    "in case the current was left high by accident. Applies to the Acquire "
+    "buttons."
+)
+_TXT_NO_LIMIT = "No limit"
+_TXT_NO_MICROSCOPE = (
+    "Connect to a microscope to choose from its beam currents. Until then only "
+    "the saved limits are offered."
+)
+
 
 class PreferencesDialog(QDialog):
     """Dialog for editing user preferences."""
 
-    def __init__(self, preferences: UserPreferences, parent=None):
+    def __init__(self, preferences: UserPreferences, parent=None, microscope=None):
+        """``microscope`` supplies the beam currents the imaging limits are chosen
+        from. Optional: without one, only the saved limits are offered."""
         super().__init__(parent)
         self.setWindowTitle("Preferences")
         self.setMinimumWidth(500)
         self._preferences = preferences
+        self._microscope = microscope
         self._setup_ui()
         self._load_from_preferences(preferences)
         # Connected after loading, so opening this dialog with a flag already on does
@@ -130,7 +152,7 @@ class PreferencesDialog(QDialog):
         self._sidebar = QListWidget()
         self._sidebar.setFixedWidth(120)
         self._sidebar.addItems(
-            ["Display", "Features", "Experiment", "Movement", "Agent"]
+            ["Display", "Features", "Experiment", "Movement", "Imaging", "Agent"]
         )
         self._sidebar.setCurrentRow(0)
 
@@ -205,6 +227,24 @@ class PreferencesDialog(QDialog):
         movement_form.addRow(_LBL_ACQ_SEM, self._chk_acquire_sem)
         movement_form.addRow(_LBL_ACQ_FIB, self._chk_acquire_fib)
         self._stack.addWidget(movement_page)
+
+        # --- Imaging ---
+        # Each limit is one of the instrument's own currents, carried as item data so
+        # what is saved is the exact value the instrument reports, not the label.
+        imaging_page = QWidget()
+        imaging_form = QFormLayout(imaging_page)
+        self._combo_max_current_eb = QComboBox()
+        self._combo_max_current_eb.setToolTip(_TIP_MAX_CURRENT)
+        self._combo_max_current_ib = QComboBox()
+        self._combo_max_current_ib.setToolTip(_TIP_MAX_CURRENT)
+        imaging_form.addRow(_LBL_MAX_CURRENT_EB, self._combo_max_current_eb)
+        imaging_form.addRow(_LBL_MAX_CURRENT_IB, self._combo_max_current_ib)
+        if self._microscope is None:
+            no_microscope = QLabel(_TXT_NO_MICROSCOPE)
+            no_microscope.setWordWrap(True)
+            no_microscope.setStyleSheet("color: #868e93; font-size: 11px;")
+            imaging_form.addRow(no_microscope)
+        self._stack.addWidget(imaging_page)
 
         # --- Agent ---
         # Durable policy only. Scope ARMING is deliberately absent: arming is
@@ -281,6 +321,58 @@ class PreferencesDialog(QDialog):
         self._chk_acquire_sem.setChecked(m.acquire_sem_after_stage_movement)
         self._chk_acquire_fib.setChecked(m.acquire_fib_after_stage_movement)
 
+        i = prefs.imaging
+        self._fill_current_combo(
+            self._combo_max_current_eb,
+            BeamType.ELECTRON,
+            i.max_imaging_current_electron,
+        )
+        self._fill_current_combo(
+            self._combo_max_current_ib, BeamType.ION, i.max_imaging_current_ion
+        )
+
+    def _fill_current_combo(
+        self, combo: QComboBox, beam_type: BeamType, selected: Optional[float]
+    ) -> None:
+        """Offer "No limit" and the instrument's currents for ``beam_type``, and
+        select ``selected``.
+
+        A saved limit the instrument does not list -- no microscope connected, or a
+        limit chosen on another instrument -- is still offered, so opening and
+        closing the dialog never changes a limit nobody touched.
+        """
+        currents = []
+        if self._microscope is not None:
+            try:
+                currents = [
+                    float(c)
+                    for c in self._microscope.get_available_values_cached(
+                        "current", beam_type
+                    )
+                ]
+            except Exception as e:
+                logging.warning(
+                    f"Could not read the {beam_type.name} beam currents: {e}"
+                )
+        if selected is not None and not any(
+            abs(c - selected) <= abs(selected) * 1e-6 for c in currents
+        ):
+            currents.append(float(selected))
+
+        combo.clear()
+        combo.addItem(_TXT_NO_LIMIT, None)
+        for current in sorted(set(currents)):
+            combo.addItem(format_value(current, unit="A"), current)
+
+        index = 0
+        if selected is not None:
+            for row in range(1, combo.count()):
+                value = combo.itemData(row)
+                if abs(value - selected) <= abs(selected) * 1e-6:
+                    index = row
+                    break
+        combo.setCurrentIndex(index)
+
     def _on_restore_defaults(self):
         reply = QMessageBox.question(
             self,
@@ -310,6 +402,7 @@ class PreferencesDialog(QDialog):
             DisplayPreferences,
             ExperimentPreferences,
             FeatureFlags,
+            ImagingPreferences,
             MovementPreferences,
         )
 
@@ -330,6 +423,10 @@ class PreferencesDialog(QDialog):
                 acquire_sem_after_stage_movement=self._chk_acquire_sem.isChecked(),
                 acquire_fib_after_stage_movement=self._chk_acquire_fib.isChecked(),
             ),
+            imaging=ImagingPreferences(
+                max_imaging_current_electron=self._combo_max_current_eb.currentData(),
+                max_imaging_current_ion=self._combo_max_current_ib.currentData(),
+            ),
             agent=AgentPreferences(
                 watchdog_minutes=self._spin_watchdog.value(),
             ),
@@ -342,6 +439,9 @@ class PreferencesDialog(QDialog):
                 project=self._edit_exp_project.text(),
                 organisation=self._edit_exp_organisation.text(),
             ),
-            # Preserve sections not managed by this dialog.
+            # Preserve sections not managed by this dialog. hooks too: rebuilt
+            # without it, OK reset a user's hooks to the defaults (None means
+            # "never configured").
             reporting=self._preferences.reporting,
+            hooks=self._preferences.hooks,
         )
